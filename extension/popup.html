@@ -41,26 +41,28 @@
           <span>默认排序</span>
           <select id="rankingMode">
             <option value="balanced">综合</option>
-            <option value="recent">最新</option>
-            <option value="hot">热门</option>
-            <option value="custom">自定义权重</option>
+            <option value="recent">时间优先</option>
+            <option value="hot">热度优先</option>
+            <option value="custom">自定义</option>
           </select>
         </label>
-        <label class="field">
-          <span>相关性权重</span>
-          <input id="relevanceWeight" type="range" min="0" max="100" step="5">
-          <output id="relevanceValue"></output>
-        </label>
-        <label class="field">
-          <span>时间权重</span>
-          <input id="timeWeight" type="range" min="0" max="100" step="5">
-          <output id="timeValue"></output>
-        </label>
-        <label class="field">
-          <span>热度权重</span>
-          <input id="hotWeight" type="range" min="0" max="100" step="5">
-          <output id="hotValue"></output>
-        </label>
+        <div id="customWeights" class="custom-weights" hidden>
+          <label class="field">
+            <span>相关性权重</span>
+            <input id="relevanceWeight" type="range" min="0" max="100" step="5">
+            <output id="relevanceValue"></output>
+          </label>
+          <label class="field">
+            <span>时间权重</span>
+            <input id="timeWeight" type="range" min="0" max="100" step="5">
+            <output id="timeValue"></output>
+          </label>
+          <label class="field">
+            <span>热度权重</span>
+            <input id="hotWeight" type="range" min="0" max="100" step="5">
+            <output id="hotValue"></output>
+          </label>
+        </div>
       </section>
 
       <footer class="footer">

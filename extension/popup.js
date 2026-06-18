@@ -22,6 +22,7 @@ const ids = [
 
 const elements = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 const status = document.getElementById("status");
+const customWeights = document.getElementById("customWeights");
 const storage = globalThis.chrome?.storage?.local || {
   async get(key) {
     const raw = window.localStorage.getItem(`cc98-smart-search:${key}`);
@@ -49,11 +50,16 @@ function render(settings) {
   updateOutputs(settings);
 }
 
+function updateRankingVisibility(settings) {
+  customWeights.hidden = settings.rankingMode !== "custom";
+}
+
 function updateOutputs(settings) {
   document.getElementById("requestDelayValue").textContent = `${settings.requestDelayMs} ms`;
   document.getElementById("relevanceValue").textContent = `${settings.relevanceWeight}%`;
   document.getElementById("timeValue").textContent = `${settings.timeWeight}%`;
   document.getElementById("hotValue").textContent = `${settings.hotWeight}%`;
+  updateRankingVisibility(settings);
 }
 
 function readForm() {

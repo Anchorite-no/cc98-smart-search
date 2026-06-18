@@ -97,6 +97,15 @@ h1 {
   font-weight: 600;
 }
 
+.custom-weights {
+  display: grid;
+  gap: 12px;
+}
+
+.custom-weights[hidden] {
+  display: none;
+}
+
 select,
 input[type="range"] {
   width: 100%;

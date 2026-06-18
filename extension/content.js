@@ -1066,8 +1066,8 @@
 
     const modeLabels = {
       balanced: "综合",
-      recent: "最新",
-      hot: "热门",
+      recent: "时间优先",
+      hot: "热度优先",
       custom: "自定义"
     };
 
