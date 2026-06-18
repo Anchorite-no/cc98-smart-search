@@ -51,15 +51,32 @@
     return { ...DEFAULT_SETTINGS, ...(settings || {}) };
   }
 
+  function getChromeStorageLocal() {
+    try {
+      return globalThis.chrome?.storage?.local || null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function getChromeStorageOnChanged() {
+    try {
+      return globalThis.chrome?.storage?.onChanged || null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
   async function loadSettings() {
-    if (!globalThis.chrome?.storage?.local) {
+    const storage = getChromeStorageLocal();
+    if (!storage) {
       state.settings = { ...DEFAULT_SETTINGS };
       state.activeMode = DEFAULT_SETTINGS.rankingMode;
       return state.settings;
     }
 
     try {
-      const data = await chrome.storage.local.get("settings");
+      const data = await storage.get("settings");
       state.settings = normalizeSettings(data.settings);
       state.activeMode = state.settings.rankingMode || "balanced";
       return state.settings;
@@ -71,10 +88,11 @@
   }
 
   function installSettingsListener() {
-    if (!globalThis.chrome?.storage?.onChanged) return;
+    const onChanged = getChromeStorageOnChanged();
+    if (!onChanged) return;
 
     try {
-      chrome.storage.onChanged.addListener((changes, areaName) => {
+      onChanged.addListener((changes, areaName) => {
         if (areaName !== "local" || !changes.settings) return;
         state.settings = normalizeSettings(changes.settings.newValue);
         state.activeMode = state.settings.rankingMode || "balanced";
