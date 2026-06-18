@@ -27,7 +27,12 @@
     ["C语言", "C程", "C programming"]
   ];
 
+  const generatedTeacherAliasGroups = Array.isArray(globalThis.CC98_SMART_SEARCH_TEACHER_ALIAS_GROUPS)
+    ? globalThis.CC98_SMART_SEARCH_TEACHER_ALIAS_GROUPS
+    : [];
+
   const teacherAliasGroups = [
+    ...generatedTeacherAliasGroups,
     ["韩刚", "hg"]
   ];
 

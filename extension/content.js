@@ -141,6 +141,7 @@
   }
 
   const ALIASES = buildAliasMap(RAW_ALIAS_GROUPS);
+  const NORMALIZED_ALIAS_KEYS = new Map(Object.keys(ALIASES).map((key) => [normalizeText(key), key]));
 
   let segmentEntries = null;
 
@@ -253,7 +254,7 @@
 
   function aliasesFor(term, fuzzyLevel) {
     const normalized = normalizeText(term);
-    const foundKey = Object.keys(ALIASES).find((key) => normalizeText(key) === normalized);
+    const foundKey = NORMALIZED_ALIAS_KEYS.get(normalized);
     const direct = foundKey ? ALIASES[foundKey] : [];
     const level = Number.isFinite(fuzzyLevel) ? fuzzyLevel : state.settings.fuzzyLevel;
 

@@ -14,7 +14,7 @@
 - 综合、时间优先、热度优先、自定义排序
 - 点击插件图标开关增强、调节模糊程度、补召回间隔；仅在自定义排序时显示权重设置
 
-模糊程度会影响别名补召回组数和相关性评分。补召回只查别名查询，不重复查询主关键词；默认 1.2 秒后发起，遇到限流会自动退避重试。API 失败时会保留 CC98 原生结果，只跳过补召回。当前词库在 `extension/lexicon.js`，别名组内词会被当作强等效词处理，例如 `数字逻辑 / 数逻 / digital logic`、`微积分 / vif / 微甲 / 微乙`、`韩刚 / hg`。
+模糊程度会影响别名补召回组数和相关性评分。补召回只查别名查询，不重复查询主关键词；默认 1.2 秒后发起，遇到限流会自动退避重试。API 失败时会保留 CC98 原生结果，只跳过补召回。手工课程词库在 `extension/lexicon.js`，老师首字母词库在 `extension/teacher-lexicon.js`；别名组内词会被当作强等效词处理，例如 `数字逻辑 / 数逻 / digital logic`、`微积分 / vif / 微甲 / 微乙`、`韩刚 / hg`。
 
 排序逻辑：
 
@@ -39,11 +39,13 @@
 
 ## 词库维护
 
-课程简称、英文名和老师简称都维护在 `extension/lexicon.js`：
+课程简称、英文名和手工老师简称维护在 `extension/lexicon.js`：
 
 - `courseAliasGroups`：课程名、简称、英文名，例如 `["数字逻辑", "数逻", "digital logic"]`
 - `teacherAliasGroups`：老师姓名和常用缩写，例如 `["韩刚", "hg"]`
 - `segmentTerms`：只用于切分无空格输入的普通词，例如 `期中`、`期末`、`教材`
+
+批量老师首字母词库维护在 `extension/teacher-lexicon.js`。当前从 `https://chalaoshi.de/t/{id}/` 扫描 `1..12000` 生成，得到 `10295` 个有效详情页、`9787` 个去重姓名、`9786` 个姓名/首字母强等效组，最大有效 ID 为 `10933`。
 
 后续新增老师时，不需要改排序算法，只要在 `teacherAliasGroups` 里追加一组即可。
 
@@ -53,4 +55,4 @@
 npm run build
 ```
 
-该命令会检查 lexicon、content script、popup script 语法并校验 `manifest.json`。
+该命令会检查 teacher lexicon、lexicon、content script、popup script 语法并校验 `manifest.json`。
