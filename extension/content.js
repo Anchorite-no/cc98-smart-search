@@ -52,21 +52,33 @@
       return state.settings;
     }
 
-    const data = await chrome.storage.local.get("settings");
-    state.settings = normalizeSettings(data.settings);
-    state.activeMode = state.settings.rankingMode || "balanced";
-    return state.settings;
+    try {
+      const data = await chrome.storage.local.get("settings");
+      state.settings = normalizeSettings(data.settings);
+      state.activeMode = state.settings.rankingMode || "balanced";
+      return state.settings;
+    } catch (_error) {
+      // Happens when a page keeps an old content script after the unpacked
+      // extension is reloaded. Keep search usable instead of swallowing clicks.
+      state.settings = { ...DEFAULT_SETTINGS };
+      state.activeMode = DEFAULT_SETTINGS.rankingMode;
+      return state.settings;
+    }
   }
 
   function installSettingsListener() {
     if (!globalThis.chrome?.storage?.onChanged) return;
 
-    chrome.storage.onChanged.addListener((changes, areaName) => {
-      if (areaName !== "local" || !changes.settings) return;
-      state.settings = normalizeSettings(changes.settings.newValue);
-      state.activeMode = state.settings.rankingMode || "balanced";
-      if (state.lastPayload) renderResults(state.lastPayload);
-    });
+    try {
+      chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName !== "local" || !changes.settings) return;
+        state.settings = normalizeSettings(changes.settings.newValue);
+        state.activeMode = state.settings.rankingMode || "balanced";
+        if (state.lastPayload) renderResults(state.lastPayload);
+      });
+    } catch (_error) {
+      // Ignore invalidated extension contexts; loadSettings has a fallback.
+    }
   }
 
   function sleep(ms) {
@@ -675,7 +687,7 @@
       if (!shouldHandleEvent(event.target)) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      runSmartSearch();
+      runSmartSearch().catch(renderError);
     }, true);
 
     document.addEventListener("keypress", (event) => {
@@ -683,10 +695,15 @@
       if (!shouldHandleEvent(event.target)) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      runSmartSearch();
+      runSmartSearch().catch(renderError);
     }, true);
   }
 
   installSettingsListener();
-  loadSettings().finally(installInterceptors);
+  loadSettings()
+    .catch(() => {
+      state.settings = { ...DEFAULT_SETTINGS };
+      state.activeMode = DEFAULT_SETTINGS.rankingMode;
+    })
+    .finally(installInterceptors);
 })();
