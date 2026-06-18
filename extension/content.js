@@ -352,6 +352,19 @@
     return uniq(phrases);
   }
 
+  function addShortPhraseScore(scores, phrase, positionIndex) {
+    const current = scores.get(phrase) || 0;
+    const lengthBonus = phrase.length === 2 ? 4 : phrase.length === 3 ? 2 : 1;
+    const positionBonus = Math.max(0, 6 - Math.min(positionIndex, 6));
+    scores.set(phrase, current + lengthBonus + positionBonus);
+  }
+
+  function sortShortPhraseScores(scores) {
+    return Array.from(scores.entries())
+      .sort((left, right) => right[1] - left[1] || left[0].length - right[0].length)
+      .map(([phrase]) => phrase);
+  }
+
   function mineShortQueryPhrases(container, shortTerm) {
     if (!container || !shortTerm) return [];
 
@@ -361,16 +374,59 @@
       const title = card.querySelector(".focus-topic-title")?.textContent || "";
       for (const phrase of extractShortPhrasesFromText(title, shortTerm)) {
         if (compactText(phrase) === compactText(shortTerm)) continue;
-        const current = scores.get(phrase) || 0;
-        const lengthBonus = phrase.length === 2 ? 4 : phrase.length === 3 ? 2 : 1;
-        const positionBonus = Math.max(0, 6 - Math.min(cardIndex, 6));
-        scores.set(phrase, current + lengthBonus + positionBonus);
+        addShortPhraseScore(scores, phrase, cardIndex);
       }
     }
 
-    return Array.from(scores.entries())
-      .sort((left, right) => right[1] - left[1] || left[0].length - right[0].length)
-      .map(([phrase]) => phrase);
+    return sortShortPhraseScores(scores);
+  }
+
+  function mineShortQueryPhrasesFromResults(results, shortTerm) {
+    if (!Array.isArray(results) || !shortTerm) return [];
+
+    const scores = new Map();
+    for (const [resultIndex, result] of results.entries()) {
+      for (const phrase of extractShortPhrasesFromText(result.title, shortTerm)) {
+        if (compactText(phrase) === compactText(shortTerm)) continue;
+        addShortPhraseScore(scores, phrase, resultIndex);
+      }
+    }
+
+    return sortShortPhraseScores(scores);
+  }
+
+  function refreshShortQueryPhrases(parsed, queries) {
+    state.shortQueryPhrases = getShortQueryTerm(parsed)
+      ? queries
+          .filter((query) => normalizeText(query) !== normalizeText(buildNativeSearchQuery(parsed)))
+          .slice(0, 4)
+      : [];
+  }
+
+  function appendDynamicShortQueryPhrases(parsed, queries, results, limit) {
+    const shortTerm = getShortQueryTerm(parsed);
+    if (!shortTerm || queries.length >= limit) return 0;
+
+    const originalQuery = normalizeText(buildNativeSearchQuery(parsed));
+    const seen = new Set(queries.map((query) => normalizeText(query)));
+    let added = 0;
+
+    for (const phrase of mineShortQueryPhrasesFromResults(results, shortTerm)) {
+      const key = normalizeText(phrase);
+      if (!key || key === originalQuery || seen.has(key)) continue;
+
+      queries.push(phrase);
+      seen.add(key);
+      added += 1;
+      if (queries.length >= limit) break;
+    }
+
+    if (added > 0) {
+      state.supplementalQueries = queries.slice();
+      refreshShortQueryPhrases(parsed, queries);
+    }
+
+    return added;
   }
 
   function buildShortQuerySupplementalQueries(parsed, container, limit) {
@@ -1017,19 +1073,18 @@
 
     const queries = buildSupplementalQueriesFromContainer(parsed, container);
     state.supplementalQueries = queries;
-    state.shortQueryPhrases = getShortQueryTerm(parsed)
-      ? queries.filter((query) => normalizeText(query) !== normalizeText(buildNativeSearchQuery(parsed))).slice(0, 4)
-      : [];
+    refreshShortQueryPhrases(parsed, queries);
     if (!queries.length) return;
     state.supplementalStatus = `等待 ${(supplementalDelayMs() / 1000).toFixed(1)}s 后补召回`;
 
-    runSupplementalSearches(container, key, queries);
+    runSupplementalSearches(container, key, queries, parsed);
   }
 
-  async function runSupplementalSearches(container, key, queries) {
+  async function runSupplementalSearches(container, key, queries, parsed) {
     state.supplementalRunning = true;
     state.supplementalError = "";
     const boardId = getCurrentSearchBoardId();
+    const queryLimit = maxSupplementalQueries();
 
     try {
       await sleep(supplementalDelayMs());
@@ -1042,6 +1097,7 @@
         try {
           const results = await fetchTopicSearchWithRetry(boardId, query);
           if (state.supplementalKey !== key) return;
+          appendDynamicShortQueryPhrases(parsed, queries, results, queryLimit);
           state.supplementalAdded += appendApiResults(container, results, query);
           state.supplementalStatus = "";
           sortNativeResultsSoon();
