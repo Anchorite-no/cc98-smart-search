@@ -1,15 +1,10 @@
 (function () {
   "use strict";
 
-  const API_BASE = "https://api.cc98.org";
-  const PAGE_SIZE = 20;
-  const CACHE_TTL_MS = 10 * 60 * 1000;
-  const ROOT_ID = "cc98-smart-search-root";
+  const QUERY_SESSION_KEY = "cc98-smart-search:lastQuery";
   const DEFAULT_SETTINGS = {
     enabled: true,
     fuzzyLevel: 1,
-    maxQueries: 1,
-    requestDelayMs: 1200,
     rankingMode: "balanced",
     relevanceWeight: 70,
     timeWeight: 15,
@@ -34,11 +29,12 @@
   };
 
   const state = {
-    activeMode: DEFAULT_SETTINGS.rankingMode,
-    lastPayload: null,
     settings: { ...DEFAULT_SETTINGS },
-    cache: new Map(),
-    boardNames: new Map()
+    activeMode: DEFAULT_SETTINGS.rankingMode,
+    isSorting: false,
+    observer: null,
+    sortTimer: null,
+    suppressMutations: false
   };
 
   function normalizeSettings(settings) {
@@ -58,8 +54,6 @@
       state.activeMode = state.settings.rankingMode || "balanced";
       return state.settings;
     } catch (_error) {
-      // Happens when a page keeps an old content script after the unpacked
-      // extension is reloaded. Keep search usable instead of swallowing clicks.
       state.settings = { ...DEFAULT_SETTINGS };
       state.activeMode = DEFAULT_SETTINGS.rankingMode;
       return state.settings;
@@ -74,15 +68,15 @@
         if (areaName !== "local" || !changes.settings) return;
         state.settings = normalizeSettings(changes.settings.newValue);
         state.activeMode = state.settings.rankingMode || "balanced";
-        if (state.lastPayload) renderResults(state.lastPayload);
+        if (state.settings.enabled) {
+          sortNativeResultsSoon();
+        } else {
+          restoreNativeResults();
+        }
       });
     } catch (_error) {
-      // Ignore invalidated extension contexts; loadSettings has a fallback.
+      // Ignore invalidated extension contexts.
     }
-  }
-
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   function normalizeText(value) {
@@ -121,6 +115,7 @@
     const foundKey = Object.keys(ALIASES).find((key) => normalizeText(key) === normalized);
     const direct = foundKey ? ALIASES[foundKey] : [];
     const level = Number.isFinite(fuzzyLevel) ? fuzzyLevel : state.settings.fuzzyLevel;
+
     if (level <= 0) return [term];
     if (level === 1) return uniq([term, ...direct.slice(0, 1)]);
     if (level === 2) return uniq([term, ...direct.slice(0, 2)]);
@@ -135,139 +130,173 @@
     }));
   }
 
-  function generateSearchPlan(parsed, settings) {
-    const searchableTerms = [...parsed.include, ...parsed.terms].filter(Boolean);
-    if (searchableTerms.length === 0) return [];
-
-    const base = searchableTerms.slice(0, 5);
-    const plans = [base.join(" ")];
-    const maxQueries = Math.max(1, Math.min(4, Number.parseInt(settings.maxQueries, 10) || 1));
-    const fuzzyLevel = Math.max(0, Math.min(3, Number.parseInt(settings.fuzzyLevel, 10) || 0));
-
-    if (fuzzyLevel <= 0 || maxQueries <= 1) {
-      return plans.map((query, index) => ({ query, isOriginal: index === 0 }));
-    }
-
-    for (let index = 0; index < base.length && plans.length < maxQueries; index += 1) {
-      const term = base[index];
-      const aliases = aliasesFor(term, fuzzyLevel).filter((alias) => normalizeText(alias) !== normalizeText(term));
-
-      for (const alias of aliases) {
-        if (plans.length >= maxQueries) break;
-        const next = base.slice();
-        next[index] = alias;
-        plans.push(next.join(" "));
-      }
-    }
-
-    return uniq(plans).slice(0, maxQueries).map((query, index) => ({
-      query,
-      isOriginal: index === 0
-    }));
+  function currentScopeText() {
+    return document.querySelector(".searchBoxSelect")?.textContent?.trim() || "主题";
   }
 
-  function readCc98Storage(key) {
-    const raw = window.localStorage.getItem(key);
-    const expiresAt = window.localStorage.getItem(`${key}_expirationTime`);
-    if (expiresAt && Date.now() > Number.parseInt(expiresAt, 10) * 1000) {
-      return null;
-    }
-    if (!raw) return null;
-    if (raw.startsWith("str-")) return raw.slice(4);
-    if (raw.startsWith("obj-")) {
-      try {
-        return JSON.parse(raw.slice(4));
-      } catch (_error) {
-        return null;
-      }
-    }
-    return raw;
+  function currentInputValue() {
+    return document.querySelector("#searchText")?.value?.trim() || "";
   }
 
-  function getAuthorizationHeader() {
-    const token = readCc98Storage("accessToken");
-    return typeof token === "string" && token.startsWith("Bearer ") ? token : null;
-  }
-
-  async function cc98Fetch(path, options) {
-    const headers = new Headers(options && options.headers ? options.headers : undefined);
-    const authorization = getAuthorizationHeader();
-    if (authorization) headers.set("Authorization", authorization);
-    headers.set("Accept", "application/json");
-
-    const response = await fetch(new URL(path, API_BASE).toString(), {
-      ...options,
-      headers
-    });
-
-    if (response.status === 401) {
-      throw new Error("需要登录 CC98 后才能使用增强主题搜索。");
-    }
-    if (response.status === 403) {
-      const error = new Error("搜索请求被 CC98 拒绝，可能是请求过于频繁。");
-      error.code = "CC98_RATE_LIMITED";
-      throw error;
-    }
-    if (!response.ok) {
-      throw new Error(`CC98 搜索请求失败：${response.status}`);
-    }
-    return response.json();
-  }
-
-  async function resolveBoardIdForScope(scopeText) {
+  function getBoardIdFromPage(scopeText) {
     if (scopeText === "主题" || scopeText === "全站") return 0;
-    if (scopeText !== "版内") return null;
 
     const boardMatch = location.pathname.match(/\/board\/(\d+)/i);
     if (boardMatch) return Number.parseInt(boardMatch[1], 10);
 
     const searchBoard = new URLSearchParams(location.search).get("boardId");
-    if (searchBoard && Number.parseInt(searchBoard, 10) > 0) {
-      return Number.parseInt(searchBoard, 10);
-    }
+    if (searchBoard) return Number.parseInt(searchBoard, 10) || 0;
 
-    const topicMatch = location.pathname.match(/\/topic\/(\d+)/i);
-    if (!topicMatch) return 0;
-
-    try {
-      const topic = await cc98Fetch(`/topic/${topicMatch[1]}`);
-      return Number.parseInt(topic.boardId, 10) || 0;
-    } catch (_error) {
-      return 0;
-    }
+    return 0;
   }
 
-  async function getBoardName(boardId) {
-    if (!boardId) return "全站";
-    if (state.boardNames.has(boardId)) return state.boardNames.get(boardId);
+  function buildNativeSearchQuery(parsed) {
+    return [...parsed.include, ...parsed.terms].filter(Boolean).join(" ").trim();
+  }
 
+  function doubleEncode(value) {
+    return encodeURIComponent(encodeURIComponent(value));
+  }
+
+  function doubleDecode(value) {
     try {
-      const boards = await cc98Fetch("/board/all");
-      for (const board of boards || []) {
-        state.boardNames.set(board.id, board.name);
+      return decodeURIComponent(decodeURIComponent(value || ""));
+    } catch (_error) {
+      try {
+        return decodeURIComponent(value || "");
+      } catch (_ignored) {
+        return value || "";
       }
-    } catch (_error) {
-      return `版面 ${boardId}`;
     }
-
-    return state.boardNames.get(boardId) || `版面 ${boardId}`;
   }
 
-  async function fetchTopicSearch(boardId, query) {
-    const cacheKey = `${boardId}:${query}`;
-    const cached = state.cache.get(cacheKey);
-    if (cached && Date.now() - cached.time < CACHE_TTL_MS) {
-      return cached.data;
+  function rememberParsedQuery(parsed) {
+    try {
+      window.sessionStorage.setItem(QUERY_SESSION_KEY, JSON.stringify(parsed));
+    } catch (_error) {
+      // Session storage is a convenience only.
+    }
+  }
+
+  function readRememberedQuery() {
+    try {
+      const raw = window.sessionStorage.getItem(QUERY_SESSION_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function getQueryForCurrentSearchPage() {
+    const params = new URLSearchParams(location.search);
+    const urlQuery = doubleDecode(params.get("keyword") || "");
+    const remembered = readRememberedQuery();
+    const rememberedNative = remembered ? buildNativeSearchQuery(remembered) : "";
+
+    if (remembered && rememberedNative === urlQuery) return remembered;
+    return parseQuery(urlQuery);
+  }
+
+  function navigateToNativeSearch(query) {
+    const parsed = parseQuery(query);
+    const nativeQuery = buildNativeSearchQuery(parsed);
+    if (!nativeQuery) return;
+
+    const scope = currentScopeText();
+    if (scope === "用户" || scope === "版面") return;
+
+    const boardId = getBoardIdFromPage(scope);
+    rememberParsedQuery(parsed);
+    window.location.assign(`/search?boardId=${boardId}&keyword=${doubleEncode(nativeQuery)}`);
+  }
+
+  function shouldHandleEvent(target) {
+    if (!state.settings.enabled) return false;
+    const scope = currentScopeText();
+    if (scope === "用户" || scope === "版面") return false;
+    return Boolean(target && (target.closest?.(".searchIco") || target.id === "searchText"));
+  }
+
+  function installSearchNavigation() {
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest?.(".searchIco")) return;
+      if (!shouldHandleEvent(event.target)) return;
+      const query = currentInputValue();
+      if (!query) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      navigateToNativeSearch(query);
+    }, true);
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.keyCode !== 13) return;
+      if (!shouldHandleEvent(event.target)) return;
+      const query = currentInputValue();
+      if (!query) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      navigateToNativeSearch(query);
+    }, true);
+  }
+
+  function toNumber(value) {
+    if (typeof value === "number") return value;
+    const text = String(value || "").trim();
+    if (!text) return 0;
+    if (text.endsWith("万")) return Number.parseFloat(text) * 10000 || 0;
+    return Number.parseFloat(text) || 0;
+  }
+
+  function parseCc98Date(value) {
+    const text = String(value || "").trim();
+    if (!text) return null;
+
+    const now = new Date();
+    const timeMatch = text.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    const fullDateMatch = text.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+
+    if (fullDateMatch) {
+      const year = Number(fullDateMatch[1]);
+      const month = Number(fullDateMatch[2]) - 1;
+      const day = Number(fullDateMatch[3]);
+      const hour = timeMatch ? Number(timeMatch[1]) : 0;
+      const minute = timeMatch ? Number(timeMatch[2]) : 0;
+      const second = timeMatch && timeMatch[3] ? Number(timeMatch[3]) : 0;
+      return new Date(year, month, day, hour, minute, second);
     }
 
-    const encoded = encodeURIComponent(query);
-    const path = boardId === 0
-      ? `/topic/search?keyword=${encoded}&size=${PAGE_SIZE}&from=0`
-      : `/topic/search/board/${boardId}?keyword=${encoded}&size=${PAGE_SIZE}&from=0`;
+    const relativeDays = text.includes("今天")
+      ? 0
+      : text.includes("昨天")
+        ? 1
+        : text.includes("前天")
+          ? 2
+          : null;
 
-    const data = await cc98Fetch(path);
-    state.cache.set(cacheKey, { time: Date.now(), data: Array.isArray(data) ? data : [] });
-    return Array.isArray(data) ? data : [];
+    if (relativeDays !== null && timeMatch) {
+      const date = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      date.setDate(date.getDate() - relativeDays);
+      date.setHours(Number(timeMatch[1]), Number(timeMatch[2]), timeMatch[3] ? Number(timeMatch[3]) : 0, 0);
+      return date;
+    }
+
+    const parsed = new Date(text);
+    return Number.isFinite(parsed.getTime()) ? parsed : null;
+  }
+
+  function getTimeScore(value) {
+    const date = parseCc98Date(value);
+    if (!date) return 0;
+    const days = (Date.now() - date.getTime()) / 86400000;
+    if (days <= 7) return 30;
+    if (days <= 30) return 20;
+    if (days <= 180) return 10;
+    if (days <= 365) return 5;
+    return 0;
+  }
+
+  function getHotScore(hitCount, replyCount) {
+    return Math.log10(toNumber(hitCount) + 1) * 8 + Math.log10(toNumber(replyCount) + 1) * 15;
   }
 
   function getResultText(result) {
@@ -275,7 +304,7 @@
       result.title,
       result.userName,
       result.boardName,
-      result.lastPostUser
+      result.infoText
     ].join(" "));
   }
 
@@ -292,43 +321,10 @@
     });
   }
 
-  function dateFromResult(result) {
-    const value = result.lastPostTime || result.time;
-    const date = value ? new Date(value) : null;
-    return date && Number.isFinite(date.getTime()) ? date : null;
-  }
-
-  function toNumber(value) {
-    if (typeof value === "number") return value;
-    const text = String(value || "").trim();
-    if (!text) return 0;
-    if (text.endsWith("万")) return Number.parseFloat(text) * 10000 || 0;
-    return Number.parseFloat(text) || 0;
-  }
-
-  function getTimeScore(result) {
-    const date = dateFromResult(result);
-    if (!date) return 0;
-    const days = (Date.now() - date.getTime()) / 86400000;
-    if (days <= 7) return 30;
-    if (days <= 30) return 20;
-    if (days <= 180) return 10;
-    if (days <= 365) return 5;
-    return 0;
-  }
-
-  function getHotScore(result) {
-    const hitCount = toNumber(result.hitCount);
-    const replyCount = toNumber(result.replyCount);
-    return Math.log10(hitCount + 1) * 8 + Math.log10(replyCount + 1) * 15;
-  }
-
-  function getRelevanceScore(result, parsed, originalQuery) {
+  function getRelevanceScore(result, parsed) {
     const title = normalizeText(result.title);
     const haystack = getResultText(result);
     let score = 0;
-
-    if (title.includes(normalizeText(originalQuery))) score += 100;
 
     for (const term of parsed.include) {
       for (const candidate of expandedMatchTerms(term)) {
@@ -340,46 +336,49 @@
     }
 
     for (const term of parsed.terms) {
-      const candidates = expandedMatchTerms(term);
-      for (const candidate of candidates) {
+      for (const candidate of expandedMatchTerms(term)) {
         if (title.includes(candidate.normalized)) {
           score += candidate.confidence >= 1 ? 30 : candidate.confidence >= 0.8 ? 25 : 10;
+          break;
+        }
+        if (haystack.includes(candidate.normalized)) {
+          score += candidate.confidence >= 1 ? 12 : 8;
           break;
         }
       }
     }
 
-    const extraMatches = Math.max(0, (result.matchedQueries || []).length - 1);
-    score += extraMatches * 20;
-
-    const sourceRank = result.bestSourceRank || 0;
-    score += Math.max(0, 15 - sourceRank * 3);
-
+    score += Math.max(0, 20 - result.originalIndex);
     return score;
   }
 
-  function scoreResult(result, parsed, mode, settings) {
-    const relevanceScore = getRelevanceScore(result, parsed, parsed.raw);
-    const timeScore = getTimeScore(result);
-    const hotScore = getHotScore(result);
-
+  function getWeights(mode, settings) {
     const presets = {
       balanced: [0.7, 0.15, 0.15],
       recent: [0.4, 0.45, 0.15],
       hot: [0.4, 0.1, 0.5]
     };
-    const customTotal = Math.max(
+
+    if (mode !== "custom") return presets[mode] || presets.balanced;
+
+    const total = Math.max(
       1,
       Number(settings.relevanceWeight || 0) +
         Number(settings.timeWeight || 0) +
         Number(settings.hotWeight || 0)
     );
-    const custom = [
-      Number(settings.relevanceWeight || 0) / customTotal,
-      Number(settings.timeWeight || 0) / customTotal,
-      Number(settings.hotWeight || 0) / customTotal
+    return [
+      Number(settings.relevanceWeight || 0) / total,
+      Number(settings.timeWeight || 0) / total,
+      Number(settings.hotWeight || 0) / total
     ];
-    const weights = mode === "custom" ? custom : presets[mode] || presets.balanced;
+  }
+
+  function scoreResult(result, parsed) {
+    const relevanceScore = getRelevanceScore(result, parsed);
+    const timeScore = getTimeScore(result.lastPostTime || result.time);
+    const hotScore = getHotScore(result.hitCount, result.replyCount);
+    const weights = getWeights(state.activeMode, state.settings);
 
     return {
       relevanceScore,
@@ -389,314 +388,151 @@
     };
   }
 
-  function mergeResults(batches, parsed) {
-    const merged = new Map();
-
-    for (const batch of batches) {
-      batch.results.forEach((raw, sourceRank) => {
-        const id = raw.id || raw.topicId;
-        if (!id) return;
-
-        const existing = merged.get(id);
-        const next = existing || {
-          ...raw,
-          id,
-          matchedQueries: [],
-          bestSourceRank: sourceRank
-        };
-
-        next.matchedQueries.push(batch.query);
-        next.bestSourceRank = Math.min(next.bestSourceRank, sourceRank);
-        merged.set(id, next);
-      });
+  function extractNativeResult(card, originalIndex) {
+    if (!card.dataset.cc98SmartSearchOriginalIndex) {
+      card.dataset.cc98SmartSearchOriginalIndex = String(originalIndex);
+    }
+    if (!Object.prototype.hasOwnProperty.call(card.dataset, "cc98SmartSearchHadTitle")) {
+      card.dataset.cc98SmartSearchHadTitle = card.hasAttribute("title") ? "1" : "0";
+      card.dataset.cc98SmartSearchOriginalTitle = card.getAttribute("title") || "";
     }
 
-    return Array.from(merged.values())
-      .filter((result) => !shouldDropResult(result, parsed))
-      .filter((result) => satisfiesInclude(result, parsed));
+    const title = card.querySelector(".focus-topic-title")?.textContent?.trim() || "";
+    const userName = card.querySelector(".focus-topic-userName")?.textContent?.trim() || "";
+    const boardName = card.querySelector(".focus-topic-board, .focus-topic-boardName")?.textContent?.trim() || "";
+    const info = card.querySelector(".focus-topic-info");
+    const infoText = info?.textContent?.replace(/\s+/g, " ").trim() || "";
+    const infoItems = Array.from(info?.children || []).map((item) => item.textContent.replace(/\s+/g, " ").trim());
+    const metricItems = infoItems.filter((item) => /^\d+(?:\.\d+)?万?$/.test(item));
+    const fallbackMetrics = Array.from(infoText.matchAll(/(?:^|\s)(\d+(?:\.\d+)?万?)(?=\s|$)/g)).map((match) => match[1]);
+    const dateItems = infoItems.filter((item) => /今天|昨天|前天|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}:\d{2}/.test(item));
+    const lastPostTime = dateItems[dateItems.length - 1] || "";
+    const time = dateItems[0] || "";
+
+    return {
+      card,
+      title,
+      userName,
+      boardName,
+      infoText,
+      time,
+      lastPostTime,
+      hitCount: metricItems[0] || fallbackMetrics[0] || "0",
+      replyCount: "0",
+      originalIndex: Number.parseInt(card.dataset.cc98SmartSearchOriginalIndex, 10) || originalIndex
+    };
   }
 
-  function rankResults(results, parsed, mode, settings) {
-    return results
-      .map((result) => ({
-        ...result,
-        rank: scoreResult(result, parsed, mode, settings)
-      }))
-      .sort((a, b) => b.rank.finalScore - a.rank.finalScore);
-  }
-
-  function formatDate(value) {
-    if (!value) return "时间未知";
-    const date = new Date(value);
-    if (!Number.isFinite(date.getTime())) return String(value);
-    const pad = (n) => String(n).padStart(2, "0");
-    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-  }
-
-  function escapeHtml(value) {
-    return String(value || "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
-  }
-
-  function currentScopeText() {
-    return document.querySelector(".searchBoxSelect")?.textContent?.trim() || "主题";
-  }
-
-  function currentInputValue() {
-    return document.querySelector("#searchText")?.value?.trim() || "";
-  }
-
-  function ensureRoot() {
-    let root = document.getElementById(ROOT_ID);
-    if (root) return root;
-
-    root = document.createElement("section");
-    root.id = ROOT_ID;
-
-    const focus = document.querySelector(".focus");
-    const mainContainer = document.querySelector(".main-container");
-    const search = document.querySelector("#search");
-    const anchor = focus || mainContainer || search || document.body;
-
-    if (focus) {
-      focus.prepend(root);
-    } else if (anchor === document.body) {
-      document.body.prepend(root);
-    } else {
-      anchor.parentElement.insertBefore(root, anchor.nextSibling);
+  function renderNativeHint(container, visibleCount, totalCount) {
+    let hint = document.getElementById("cc98-smart-search-native-hint");
+    if (!hint) {
+      hint = document.createElement("div");
+      hint.id = "cc98-smart-search-native-hint";
+      container.parentElement.insertBefore(hint, container);
     }
 
-    return root;
+    const modeLabels = {
+      balanced: "综合",
+      recent: "最新",
+      hot: "热门",
+      custom: "自定义"
+    };
+    hint.textContent = `已按 ${modeLabels[state.activeMode] || "综合"} SearchRank 原生重排 ${visibleCount}/${totalCount} 条结果`;
   }
 
-  function renderShell(message) {
-    const root = ensureRoot();
-    root.innerHTML = `
-      <div class="cc98-ss-panel">
-        <div class="cc98-ss-header">
-          <div>
-            <div class="cc98-ss-kicker">CC98 Smart Search</div>
-            <h2>增强搜索</h2>
-          </div>
-          <div class="cc98-ss-status">${escapeHtml(message)}</div>
-        </div>
-      </div>
-    `;
-  }
+  function sortNativeResults() {
+    if (!state.settings.enabled || state.isSorting || !location.pathname.toLowerCase().startsWith("/search")) return;
 
-  function explainMatches(result, parsed) {
-    const haystack = getResultText(result);
-    const matches = [];
+    const container = document.querySelector(".focus-topic-topicArea");
+    if (!container) return;
 
-    for (const term of [...parsed.include, ...parsed.terms]) {
-      const hit = expandedMatchTerms(term).find((candidate) => haystack.includes(candidate.normalized));
-      if (hit) {
-        matches.push(hit.value === term ? term : `${hit.value} ← ${term}`);
-      }
-    }
+    const cards = Array.from(container.querySelectorAll(":scope > .focus-topic"));
+    if (!cards.length) return;
 
-    return uniq(matches).join("；") || "未识别到显式关键词";
-  }
-
-  function renderResults(payload) {
-    state.lastPayload = payload;
-    const root = ensureRoot();
-    const ranked = rankResults(payload.results, payload.parsed, state.activeMode, state.settings);
-    const modes = [
-      ["balanced", "综合"],
-      ["recent", "最新"],
-      ["hot", "热门"],
-      ["custom", "自定义"]
-    ];
-
-    root.innerHTML = `
-      <div class="cc98-ss-panel">
-        <div class="cc98-ss-header">
-          <div>
-            <div class="cc98-ss-kicker">CC98 Smart Search</div>
-            <h2>${escapeHtml(payload.parsed.raw)}</h2>
-          </div>
-          <div class="cc98-ss-mode" role="group" aria-label="排序方式">
-            ${modes.map(([id, label]) => `
-              <button class="${id === state.activeMode ? "active" : ""}" data-cc98-ss-mode="${id}" type="button">${label}</button>
-            `).join("")}
-          </div>
-        </div>
-        <div class="cc98-ss-plan">
-          <strong>搜索计划</strong>
-          ${payload.plan.map((item, index) => `<span>${index + 1}. ${escapeHtml(item.query)}</span>`).join("")}
-        </div>
-        ${payload.warning ? `<div class="cc98-ss-warning">${escapeHtml(payload.warning)}</div>` : ""}
-        <div class="cc98-ss-summary">
-          找到 ${ranked.length} 条增强结果 · 范围：${escapeHtml(payload.boardName)}
-        </div>
-        <div class="cc98-ss-results">
-          ${ranked.length ? ranked.map((result) => renderResultItem(result, payload.parsed)).join("") : renderEmpty()}
-        </div>
-      </div>
-    `;
-
-    root.querySelectorAll("[data-cc98-ss-mode]").forEach((button) => {
-      button.addEventListener("click", () => {
-        state.activeMode = button.getAttribute("data-cc98-ss-mode") || "balanced";
-        renderResults(payload);
-      });
-    });
-  }
-
-  function renderResultItem(result, parsed) {
-    const topicUrl = `https://www.cc98.org/topic/${result.id}/1`;
-    const boardUrl = result.boardId ? `https://www.cc98.org/board/${result.boardId}` : "https://www.cc98.org/";
-    const boardName = result.boardName || (result.boardId ? `版面 ${result.boardId}` : "全站");
-    const replyCount = toNumber(result.replyCount);
-    const hitCount = toNumber(result.hitCount);
-    const score = result.rank.finalScore.toFixed(1);
-
-    return `
-      <article class="cc98-ss-item">
-        <a class="cc98-ss-title" href="${topicUrl}" target="_blank" rel="noreferrer">${escapeHtml(result.title || "(无标题)")}</a>
-        <div class="cc98-ss-meta">
-          <a href="${boardUrl}" target="_blank" rel="noreferrer">${escapeHtml(boardName)}</a>
-          <span>${escapeHtml(result.userName || "匿名用户")}</span>
-          <span>发帖 ${escapeHtml(formatDate(result.time))}</span>
-          <span>最后回复 ${escapeHtml(formatDate(result.lastPostTime))}</span>
-        </div>
-        <div class="cc98-ss-hit">命中：${escapeHtml(explainMatches(result, parsed))}</div>
-        <div class="cc98-ss-score">
-          <span>SearchRank ${score}</span>
-          <span>相关 ${result.rank.relevanceScore.toFixed(0)}</span>
-          <span>时间 ${result.rank.timeScore.toFixed(0)}</span>
-          <span>热度 ${result.rank.hotScore.toFixed(0)}</span>
-          <span>浏览 ${Math.round(hitCount)}</span>
-          <span>回复 ${Math.round(replyCount)}</span>
-        </div>
-      </article>
-    `;
-  }
-
-  function renderEmpty() {
-    return `
-      <div class="cc98-ss-empty">
-        没有找到符合增强过滤条件的结果。可以减少 + 必须词或 - 排除词后再试。
-      </div>
-    `;
-  }
-
-  function renderError(error) {
-    const root = ensureRoot();
-    root.innerHTML = `
-      <div class="cc98-ss-panel cc98-ss-error">
-        <div class="cc98-ss-header">
-          <div>
-            <div class="cc98-ss-kicker">CC98 Smart Search</div>
-            <h2>搜索失败</h2>
-          </div>
-        </div>
-        <p>${escapeHtml(error.message || String(error))}</p>
-      </div>
-    `;
-  }
-
-  function renderNotice(message) {
-    const root = ensureRoot();
-    root.innerHTML = `
-      <div class="cc98-ss-panel cc98-ss-notice">
-        <div class="cc98-ss-header">
-          <div>
-            <div class="cc98-ss-kicker">CC98 Smart Search</div>
-            <h2>增强搜索暂时跳过</h2>
-          </div>
-        </div>
-        <p>${escapeHtml(message)}</p>
-      </div>
-    `;
-  }
-
-  async function runSmartSearch() {
-    const settings = await loadSettings();
-    if (!settings.enabled) return;
-
-    const query = currentInputValue();
-    if (!query) return;
-
-    const scope = currentScopeText();
-    if (scope === "用户" || scope === "版面") {
-      return;
-    }
-
-    renderShell("正在生成搜索计划...");
-
+    state.isSorting = true;
+    state.suppressMutations = true;
+    state.observer?.disconnect();
     try {
-      const parsed = parseQuery(query);
-      const plan = generateSearchPlan(parsed, settings);
-      if (!plan.length) {
-        throw new Error("请输入至少一个普通关键词或 + 必须词。");
+      const parsed = getQueryForCurrentSearchPage();
+      const ranked = cards
+        .map((card, originalIndex) => extractNativeResult(card, originalIndex))
+        .map((result) => ({ ...result, rank: scoreResult(result, parsed) }))
+        .sort((a, b) => b.rank.finalScore - a.rank.finalScore);
+
+      let visibleCount = 0;
+      const fragment = document.createDocumentFragment();
+      for (const result of ranked) {
+        const keep = !shouldDropResult(result, parsed) && satisfiesInclude(result, parsed);
+        result.card.classList.toggle("cc98-smart-search-hidden", !keep);
+        result.card.dataset.cc98SmartSearchScore = result.rank.finalScore.toFixed(1);
+        result.card.title = `SearchRank ${result.rank.finalScore.toFixed(1)} | 相关 ${result.rank.relevanceScore.toFixed(0)} | 时间 ${result.rank.timeScore.toFixed(0)} | 热度 ${result.rank.hotScore.toFixed(0)}`;
+        if (keep) visibleCount += 1;
+        fragment.appendChild(result.card);
       }
-
-      const boardId = await resolveBoardIdForScope(scope);
-      const boardName = await getBoardName(boardId || 0);
-      renderShell(`正在搜索 ${plan.length} 组关键词...`);
-
-      const batches = [];
-      let warning = "";
-      for (let index = 0; index < plan.length; index += 1) {
-        const item = plan[index];
-        try {
-          const results = await fetchTopicSearch(boardId || 0, item.query);
-          batches.push({ query: item.query, results });
-        } catch (error) {
-          if (error.code === "CC98_RATE_LIMITED") {
-            warning = batches.length
-              ? "CC98 暂时限制了后续增强请求，已展示已取得的部分结果。可以在插件弹窗中降低模糊程度或增加请求间隔。"
-              : "CC98 暂时限制了增强请求。可以稍后重试，或在插件弹窗中关闭增强/降低模糊程度。";
-            break;
-          }
-          throw error;
-        }
-
-        if (index < plan.length - 1) {
-          await sleep(settings.requestDelayMs);
-        }
-      }
-
-      if (!batches.length) {
-        renderNotice(warning || "没有拿到可用的增强搜索结果。");
-        return;
-      }
-      const merged = mergeResults(batches, parsed);
-      renderResults({ parsed, plan: plan.slice(0, batches.length), results: merged, boardId: boardId || 0, boardName, warning });
-    } catch (error) {
-      renderError(error);
+      container.appendChild(fragment);
+      renderNativeHint(container, visibleCount, cards.length);
+      window.setTimeout(() => {
+        state.suppressMutations = false;
+        observeNativeResults();
+      }, 0);
+    } finally {
+      state.isSorting = false;
     }
   }
 
-  function shouldHandleEvent(target) {
-    if (!state.settings.enabled) return false;
-    const scope = currentScopeText();
-    if (scope === "用户" || scope === "版面") return false;
-    return Boolean(target && (target.closest?.(".searchIco") || target.id === "searchText"));
+  function sortNativeResultsSoon() {
+    window.clearTimeout(state.sortTimer);
+    state.sortTimer = window.setTimeout(sortNativeResults, 250);
   }
 
-  function installInterceptors() {
-    document.addEventListener("click", (event) => {
-      if (!event.target.closest?.(".searchIco")) return;
-      if (!shouldHandleEvent(event.target)) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      runSmartSearch().catch(renderError);
-    }, true);
+  function restoreNativeResults() {
+    const container = document.querySelector(".focus-topic-topicArea");
+    if (!container) return;
 
-    document.addEventListener("keypress", (event) => {
-      if (event.key !== "Enter" && event.keyCode !== 13) return;
-      if (!shouldHandleEvent(event.target)) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      runSmartSearch().catch(renderError);
-    }, true);
+    const cards = Array.from(container.querySelectorAll(":scope > .focus-topic"));
+    if (!cards.length) return;
+
+    state.suppressMutations = true;
+    state.observer?.disconnect();
+    cards
+      .sort((a, b) => {
+        const left = Number.parseInt(a.dataset.cc98SmartSearchOriginalIndex, 10);
+        const right = Number.parseInt(b.dataset.cc98SmartSearchOriginalIndex, 10);
+        return (Number.isFinite(left) ? left : 0) - (Number.isFinite(right) ? right : 0);
+      })
+      .forEach((card) => {
+        card.classList.remove("cc98-smart-search-hidden");
+        delete card.dataset.cc98SmartSearchScore;
+        if (card.dataset.cc98SmartSearchHadTitle === "1") {
+          card.setAttribute("title", card.dataset.cc98SmartSearchOriginalTitle || "");
+        } else {
+          card.removeAttribute("title");
+        }
+        container.appendChild(card);
+      });
+
+    document.getElementById("cc98-smart-search-native-hint")?.remove();
+    window.setTimeout(() => {
+      state.suppressMutations = false;
+      observeNativeResults();
+    }, 0);
+  }
+
+  function observeNativeResults() {
+    if (!location.pathname.toLowerCase().startsWith("/search")) return;
+
+    if (state.observer) state.observer.disconnect();
+    state.observer = new MutationObserver(() => {
+      if (!state.isSorting && !state.suppressMutations) sortNativeResultsSoon();
+    });
+    state.observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  function installNativeSorter() {
+    if (!location.pathname.toLowerCase().startsWith("/search")) return;
+
+    sortNativeResultsSoon();
+    observeNativeResults();
   }
 
   installSettingsListener();
@@ -705,5 +541,8 @@
       state.settings = { ...DEFAULT_SETTINGS };
       state.activeMode = DEFAULT_SETTINGS.rankingMode;
     })
-    .finally(installInterceptors);
+    .finally(() => {
+      installSearchNavigation();
+      installNativeSorter();
+    });
 })();

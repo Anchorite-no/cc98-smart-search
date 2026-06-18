@@ -7,8 +7,7 @@
     "storage"
   ],
   "host_permissions": [
-    "https://www.cc98.org/*",
-    "https://api.cc98.org/*"
+    "https://www.cc98.org/*"
   ],
   "action": {
     "default_title": "CC98 Smart Search",

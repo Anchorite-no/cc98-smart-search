@@ -3,8 +3,6 @@
 const DEFAULT_SETTINGS = {
   enabled: true,
   fuzzyLevel: 1,
-  maxQueries: 1,
-  requestDelayMs: 1200,
   rankingMode: "balanced",
   relevanceWeight: 70,
   timeWeight: 15,
@@ -14,8 +12,6 @@ const DEFAULT_SETTINGS = {
 const ids = [
   "enabled",
   "fuzzyLevel",
-  "maxQueries",
-  "requestDelayMs",
   "rankingMode",
   "relevanceWeight",
   "timeWeight",
@@ -43,8 +39,6 @@ function normalizeSettings(raw) {
 function render(settings) {
   elements.enabled.checked = Boolean(settings.enabled);
   elements.fuzzyLevel.value = String(settings.fuzzyLevel);
-  elements.maxQueries.value = String(settings.maxQueries);
-  elements.requestDelayMs.value = String(settings.requestDelayMs);
   elements.rankingMode.value = settings.rankingMode;
   elements.relevanceWeight.value = String(settings.relevanceWeight);
   elements.timeWeight.value = String(settings.timeWeight);
@@ -53,8 +47,6 @@ function render(settings) {
 }
 
 function updateOutputs(settings) {
-  document.getElementById("maxQueriesValue").textContent = `${settings.maxQueries} 组`;
-  document.getElementById("requestDelayValue").textContent = `${settings.requestDelayMs} ms`;
   document.getElementById("relevanceValue").textContent = `${settings.relevanceWeight}%`;
   document.getElementById("timeValue").textContent = `${settings.timeWeight}%`;
   document.getElementById("hotValue").textContent = `${settings.hotWeight}%`;
@@ -64,8 +56,6 @@ function readForm() {
   return {
     enabled: elements.enabled.checked,
     fuzzyLevel: Number.parseInt(elements.fuzzyLevel.value, 10),
-    maxQueries: Number.parseInt(elements.maxQueries.value, 10),
-    requestDelayMs: Number.parseInt(elements.requestDelayMs.value, 10),
     rankingMode: elements.rankingMode.value,
     relevanceWeight: Number.parseInt(elements.relevanceWeight.value, 10),
     timeWeight: Number.parseInt(elements.timeWeight.value, 10),
