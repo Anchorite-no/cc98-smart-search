@@ -9,6 +9,7 @@
   const DEFAULT_SETTINGS = {
     enabled: true,
     fuzzyLevel: 1,
+    requestDelayMs: 5000,
     rankingMode: "balanced",
     relevanceWeight: 70,
     timeWeight: 15,
@@ -49,6 +50,10 @@
 
   function normalizeSettings(settings) {
     return { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
   function getChromeStorageLocal() {
@@ -192,6 +197,12 @@
     return [0, 2, 4, 6][level] || 0;
   }
 
+  function supplementalDelayMs(multiplier = 1) {
+    const value = Number.parseInt(state.settings.requestDelayMs, 10);
+    const base = Number.isFinite(value) ? value : DEFAULT_SETTINGS.requestDelayMs;
+    return Math.max(1200, Math.min(10000, base * multiplier));
+  }
+
   function buildSupplementalQueries(parsed) {
     const limit = maxSupplementalQueries();
     if (limit <= 0) return [];
@@ -307,6 +318,16 @@
     const normalized = Array.isArray(data) ? data : [];
     state.cache.set(cacheKey, { time: Date.now(), data: normalized });
     return normalized;
+  }
+
+  async function fetchTopicSearchWithRetry(boardId, query) {
+    try {
+      return await fetchTopicSearch(boardId, query);
+    } catch (error) {
+      if (error.code !== "CC98_RATE_LIMITED") throw error;
+      await sleep(supplementalDelayMs(2));
+      return fetchTopicSearch(boardId, query);
+    }
   }
 
   function doubleEncode(value) {
@@ -679,12 +700,20 @@
     const boardId = getCurrentSearchBoardId();
 
     try {
-      for (const query of queries) {
+      await sleep(supplementalDelayMs());
+      if (state.supplementalKey !== key) return;
+
+      for (let index = 0; index < queries.length; index += 1) {
+        const query = queries[index];
         try {
-          const results = await fetchTopicSearch(boardId, query);
+          const results = await fetchTopicSearchWithRetry(boardId, query);
           if (state.supplementalKey !== key) return;
           state.supplementalAdded += appendApiResults(container, results, query);
           sortNativeResultsSoon();
+          if (index < queries.length - 1) {
+            await sleep(supplementalDelayMs());
+            if (state.supplementalKey !== key) return;
+          }
         } catch (error) {
           if (state.supplementalKey !== key) return;
           state.supplementalError = describeSupplementalError(error);
