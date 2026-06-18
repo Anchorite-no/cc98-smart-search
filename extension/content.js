@@ -9,7 +9,7 @@
   const DEFAULT_SETTINGS = {
     enabled: true,
     fuzzyLevel: 1,
-    requestDelayMs: 5000,
+    requestDelayMs: 1200,
     rankingMode: "balanced",
     relevanceWeight: 70,
     timeWeight: 15,
@@ -41,11 +41,13 @@
     sortTimer: null,
     suppressMutations: false,
     cache: new Map(),
+    users: new Map(),
     supplementalKey: "",
     supplementalRunning: false,
     supplementalAdded: 0,
     supplementalQueries: [],
-    supplementalError: ""
+    supplementalError: "",
+    supplementalStatus: ""
   };
 
   function normalizeSettings(settings) {
@@ -200,7 +202,7 @@
   function supplementalDelayMs(multiplier = 1) {
     const value = Number.parseInt(state.settings.requestDelayMs, 10);
     const base = Number.isFinite(value) ? value : DEFAULT_SETTINGS.requestDelayMs;
-    return Math.max(1200, Math.min(10000, base * multiplier));
+    return Math.max(600, Math.min(10000, base * multiplier));
   }
 
   function buildSupplementalQueries(parsed) {
@@ -315,19 +317,76 @@
       ? `/topic/search?keyword=${encoded}&size=${PAGE_SIZE}&from=0`
       : `/topic/search/board/${boardId}?keyword=${encoded}&size=${PAGE_SIZE}&from=0`;
     const data = await cc98Fetch(path);
-    const normalized = Array.isArray(data) ? data : [];
+    const normalized = Array.isArray(data) ? await enrichTopicResults(data) : [];
     state.cache.set(cacheKey, { time: Date.now(), data: normalized });
     return normalized;
   }
 
   async function fetchTopicSearchWithRetry(boardId, query) {
-    try {
-      return await fetchTopicSearch(boardId, query);
-    } catch (error) {
-      if (error.code !== "CC98_RATE_LIMITED") throw error;
-      await sleep(supplementalDelayMs(2));
-      return fetchTopicSearch(boardId, query);
+    const retryMultipliers = [0, 0.75, 1.25, 2];
+    for (let attempt = 0; attempt < retryMultipliers.length; attempt += 1) {
+      try {
+        return await fetchTopicSearch(boardId, query);
+      } catch (error) {
+        if (error.code !== "CC98_RATE_LIMITED" || attempt === retryMultipliers.length - 1) {
+          throw error;
+        }
+
+        const waitMs = supplementalDelayMs(retryMultipliers[attempt + 1]);
+        state.supplementalError = "";
+        state.supplementalStatus = `API 限流，${(waitMs / 1000).toFixed(1)}s 后重试`;
+        sortNativeResultsSoon();
+        await sleep(waitMs);
+      }
     }
+
+    return [];
+  }
+
+  async function fetchBasicUsersInfo(userIds) {
+    const needed = uniq(
+      userIds
+        .map((id) => Number.parseInt(id, 10))
+        .filter((id) => Number.isFinite(id) && id > 0)
+    ).filter((id) => !state.users.has(id));
+
+    if (needed.length) {
+      const query = needed.map((id) => `id=${encodeURIComponent(id)}`).join("&");
+      try {
+        const data = await cc98Fetch(`/user/basic?${query}`);
+        if (Array.isArray(data)) {
+          data.forEach((user) => {
+            if (user && user.id) state.users.set(Number(user.id), user);
+          });
+        }
+      } catch (_error) {
+        // Avatar enrichment is best-effort. Topic results should still render.
+      }
+    }
+
+    return state.users;
+  }
+
+  async function enrichTopicResults(results) {
+    const userIds = results.map((item) => item.userId).filter(Boolean);
+    const users = await fetchBasicUsersInfo(userIds);
+
+    return results.map((item) => {
+      if (!item.userId) {
+        return {
+          ...item,
+          portraitUrl: item.portraitUrl || "/static/images/_心灵之约.png",
+          userName: item.userName || "匿名用户"
+        };
+      }
+
+      const user = users.get(Number(item.userId));
+      return {
+        ...item,
+        portraitUrl: item.portraitUrl || user?.portraitUrl || "/static/images/default_avatar_boy.png",
+        userName: item.userName || user?.name || "匿名用户"
+      };
+    });
   }
 
   function doubleEncode(value) {
@@ -607,27 +666,61 @@
     card.dataset.cc98SmartSearchHitCount = String(raw.hitCount || 0);
     card.dataset.cc98SmartSearchReplyCount = String(raw.replyCount || 0);
 
-    const userColumn = createElement("div", "cc98-smart-search-api-user");
-    const avatar = createElement("div", "cc98-smart-search-api-avatar", (raw.userName || "匿").slice(0, 1));
+    const userUrl = raw.userId ? `/user/id/${raw.userId}` : "";
+    const topicUrl = `/topic/${topicId}`;
+    const boardUrl = raw.boardId ? `/board/${raw.boardId}` : "/";
+    const lastPostUserUrl = raw.lastPostUser ? `/user/name/${encodeURIComponent(raw.lastPostUser)}` : "";
+    const portraitUrl = raw.portraitUrl || (raw.userId ? "/static/images/default_avatar_boy.png" : "/static/images/_心灵之约.png");
+
+    const userColumn = createElement(raw.userId ? "a" : "div", "focus-topic-left");
+    if (raw.userId) {
+      userColumn.href = userUrl;
+      userColumn.target = "_blank";
+      userColumn.id = `user_cc98ss_${topicId}`;
+    }
+    const avatar = createElement("img", "focus-topic-portraitUrl");
+    avatar.src = portraitUrl;
+    avatar.alt = raw.userName || "匿名用户";
+    avatar.onerror = () => {
+      avatar.src = "/static/images/default_avatar_boy.png";
+    };
     const userName = createElement("div", "focus-topic-userName", raw.userName || "匿名用户");
     userColumn.append(avatar, userName);
 
-    const main = createElement("div", "cc98-smart-search-api-main");
+    const main = createElement("div", "focus-topic-middle");
     const title = createElement("a", "focus-topic-title", raw.title || "(无标题)");
-    title.href = `/topic/${topicId}/1`;
+    title.href = topicUrl;
+    title.target = "_blank";
     const info = createElement("div", "focus-topic-info");
+    const lastPost = createElement("div", "");
+    lastPost.append("最后回复：");
+    if (lastPostUserUrl) {
+      const lastPostLink = createElement("a", "", raw.lastPostUser);
+      lastPostLink.href = lastPostUserUrl;
+      lastPostLink.target = "_blank";
+      lastPost.append(lastPostLink);
+    } else {
+      lastPost.append("未知");
+    }
+    const timeInfo = createElement("div", "");
+    timeInfo.append(createElement("i", "fa fa-clock-o fa-lg"), formatDateLabel(raw.time));
+    const hitInfo = createElement("div", "");
+    hitInfo.append(createElement("i", "fa fa-eye fa-lg"), ` ${raw.hitCount || 0}`);
     info.append(
-      createElement("span", "", formatDateLabel(raw.time)),
-      createElement("span", "", `浏览 ${raw.hitCount || 0}`),
-      createElement("span", "", `回复 ${raw.replyCount || 0}`),
-      createElement("span", "", raw.lastPostUser ? `最后回复：${raw.lastPostUser}` : "最后回复：未知")
+      timeInfo,
+      hitInfo,
+      lastPost
     );
     main.append(title, info);
 
-    const board = createElement("a", "focus-topic-board", raw.boardName || (raw.boardId ? `版面 ${raw.boardId}` : "全站"));
-    board.href = raw.boardId ? `/board/${raw.boardId}` : "/";
+    const rightBar = createElement("div", "focus-topic-rightBar");
+    const boardLink = createElement("a", "focus-topic-right");
+    boardLink.href = boardUrl;
+    boardLink.target = "_blank";
+    const board = createElement("div", "focus-topic-board", raw.boardName || (raw.boardId ? `版面 ${raw.boardId}` : "全站"));
+    boardLink.append(board);
 
-    card.append(userColumn, main, board);
+    card.append(userColumn, main, rightBar, boardLink);
     return card;
   }
 
@@ -636,6 +729,7 @@
     state.supplementalAdded = 0;
     state.supplementalQueries = [];
     state.supplementalError = "";
+    state.supplementalStatus = "";
   }
 
   function appendApiResults(container, results, sourceQuery) {
@@ -690,6 +784,7 @@
     const queries = buildSupplementalQueries(parsed);
     state.supplementalQueries = queries;
     if (!queries.length) return;
+    state.supplementalStatus = `等待 ${(supplementalDelayMs() / 1000).toFixed(1)}s 后补召回`;
 
     runSupplementalSearches(container, key, queries);
   }
@@ -702,6 +797,8 @@
     try {
       await sleep(supplementalDelayMs());
       if (state.supplementalKey !== key) return;
+      state.supplementalStatus = "API 请求中";
+      sortNativeResultsSoon();
 
       for (let index = 0; index < queries.length; index += 1) {
         const query = queries[index];
@@ -709,6 +806,7 @@
           const results = await fetchTopicSearchWithRetry(boardId, query);
           if (state.supplementalKey !== key) return;
           state.supplementalAdded += appendApiResults(container, results, query);
+          state.supplementalStatus = "";
           sortNativeResultsSoon();
           if (index < queries.length - 1) {
             await sleep(supplementalDelayMs());
@@ -781,7 +879,11 @@
     const supplement = state.supplementalQueries.length
       ? ` · API 补召回${state.supplementalRunning ? "中" : ""}：${state.supplementalAdded} 条`
       : "";
-    const warning = state.supplementalError ? ` · ${state.supplementalError}` : "";
+    const warning = state.supplementalStatus
+      ? ` · ${state.supplementalStatus}`
+      : state.supplementalError
+        ? ` · ${state.supplementalError}`
+        : "";
     hint.textContent = `已按 ${modeLabels[state.activeMode] || "综合"} SearchRank 原生重排 ${visibleCount}/${totalCount} 条结果${supplement}${warning}`;
   }
 

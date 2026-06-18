@@ -3,7 +3,7 @@
 const DEFAULT_SETTINGS = {
   enabled: true,
   fuzzyLevel: 1,
-  requestDelayMs: 5000,
+  requestDelayMs: 1200,
   rankingMode: "balanced",
   relevanceWeight: 70,
   timeWeight: 15,
