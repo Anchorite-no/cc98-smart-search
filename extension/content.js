@@ -18,6 +18,7 @@
   const LEXICON = globalThis.CC98_SMART_SEARCH_LEXICON || {};
   const RAW_ALIAS_GROUPS = Array.isArray(LEXICON.aliasGroups) ? LEXICON.aliasGroups : [];
   const SEGMENT_TERMS = Array.isArray(LEXICON.segmentTerms) ? LEXICON.segmentTerms : [];
+  const SHORT_QUERY_EXPANSIONS = LEXICON.shortQueryExpansions || {};
 
   const state = {
     settings: { ...DEFAULT_SETTINGS },
@@ -32,6 +33,7 @@
     supplementalRunning: false,
     supplementalAdded: 0,
     supplementalQueries: [],
+    shortQueryPhrases: [],
     supplementalError: "",
     supplementalStatus: ""
   };
@@ -313,6 +315,80 @@
   }
 
   function buildSupplementalQueries(parsed) {
+    return buildSupplementalQueriesFromContainer(parsed, null);
+  }
+
+  function isSingleHanCharacter(value) {
+    return /^[\p{Script=Han}]$/u.test(compactText(value));
+  }
+
+  function getShortQueryTerm(parsed) {
+    if (parsed.exclude.length) return "";
+    if (parsed.include.length > 1 || parsed.terms.length > 1) return "";
+    if (parsed.include.length === 1 && parsed.terms.length === 0) {
+      return isSingleHanCharacter(parsed.include[0]) ? parsed.include[0] : "";
+    }
+    if (parsed.include.length === 0 && parsed.terms.length === 1) {
+      return isSingleHanCharacter(parsed.terms[0]) ? parsed.terms[0] : "";
+    }
+    return "";
+  }
+
+  function extractShortPhrasesFromText(text, shortTerm) {
+    const target = compactText(shortTerm);
+    if (!target) return [];
+
+    const phrases = [];
+    const sequences = String(text || "").match(/[\p{Script=Han}]{2,}/gu) || [];
+    for (const sequence of sequences) {
+      for (let size = 2; size <= 4; size += 1) {
+        if (sequence.length < size) continue;
+        for (let index = 0; index <= sequence.length - size; index += 1) {
+          const phrase = sequence.slice(index, index + size);
+          if (compactText(phrase).includes(target)) phrases.push(phrase);
+        }
+      }
+    }
+    return uniq(phrases);
+  }
+
+  function mineShortQueryPhrases(container, shortTerm) {
+    if (!container || !shortTerm) return [];
+
+    const scores = new Map();
+    const cards = Array.from(container.querySelectorAll(":scope > .focus-topic"));
+    for (const [cardIndex, card] of cards.entries()) {
+      const title = card.querySelector(".focus-topic-title")?.textContent || "";
+      for (const phrase of extractShortPhrasesFromText(title, shortTerm)) {
+        if (compactText(phrase) === compactText(shortTerm)) continue;
+        const current = scores.get(phrase) || 0;
+        const lengthBonus = phrase.length === 2 ? 4 : phrase.length === 3 ? 2 : 1;
+        const positionBonus = Math.max(0, 6 - Math.min(cardIndex, 6));
+        scores.set(phrase, current + lengthBonus + positionBonus);
+      }
+    }
+
+    return Array.from(scores.entries())
+      .sort((left, right) => right[1] - left[1] || left[0].length - right[0].length)
+      .map(([phrase]) => phrase);
+  }
+
+  function buildShortQuerySupplementalQueries(parsed, container, limit) {
+    const shortTerm = getShortQueryTerm(parsed);
+    if (!shortTerm || limit <= 0) return [];
+
+    const manual = Array.isArray(SHORT_QUERY_EXPANSIONS[shortTerm])
+      ? SHORT_QUERY_EXPANSIONS[shortTerm]
+      : [];
+    const mined = mineShortQueryPhrases(container, shortTerm);
+    const original = [shortTerm];
+
+    return uniq([...manual, ...mined, ...original])
+      .filter(Boolean)
+      .slice(0, limit);
+  }
+
+  function buildSupplementalQueriesFromContainer(parsed, container) {
     const limit = maxSupplementalQueries();
     if (limit <= 0) return [];
 
@@ -320,7 +396,7 @@
     if (!baseTerms.length) return [];
 
     const originalQuery = normalizeText(buildNativeSearchQuery(parsed));
-    const queries = [];
+    const queries = buildShortQuerySupplementalQueries(parsed, container, limit);
 
     for (let index = 0; index < baseTerms.length && queries.length < limit; index += 1) {
       const term = baseTerms[index];
@@ -351,7 +427,8 @@
       getCurrentSearchBoardId(),
       state.settings.fuzzyLevel,
       buildNativeSearchQuery(parsed),
-      parsed.exclude.join(" ")
+      parsed.exclude.join(" "),
+      getShortQueryTerm(parsed)
     ].map(normalizeText).join("|");
   }
 
@@ -730,6 +807,55 @@
     };
   }
 
+  function getShortQueryCluster(result, shortTerm) {
+    if (!shortTerm) return "";
+    const phrases = extractShortPhrasesFromText(result.title, shortTerm);
+    if (!phrases.length) return compactText(shortTerm);
+    return compactText(phrases.find((phrase) => phrase.length === 2) || phrases[0]);
+  }
+
+  function diversifyShortQueryRanking(ranked, parsed) {
+    const shortTerm = getShortQueryTerm(parsed);
+    if (!shortTerm || ranked.length < 3) return ranked;
+
+    const remaining = ranked.map((result) => ({
+      ...result,
+      shortQueryCluster: getShortQueryCluster(result, shortTerm)
+    }));
+    const selected = [];
+    const clusterCounts = new Map();
+
+    while (remaining.length) {
+      let bestIndex = 0;
+      let bestScore = -Infinity;
+
+      for (let index = 0; index < remaining.length; index += 1) {
+        const result = remaining[index];
+        const seen = clusterCounts.get(result.shortQueryCluster) || 0;
+        const penalty = Math.min(24, seen * 8);
+        const score = result.rank.finalScore - penalty;
+        if (score > bestScore) {
+          bestScore = score;
+          bestIndex = index;
+        }
+      }
+
+      const [next] = remaining.splice(bestIndex, 1);
+      const seen = clusterCounts.get(next.shortQueryCluster) || 0;
+      const penalty = Math.min(24, seen * 8);
+      next.rank = {
+        ...next.rank,
+        diversityPenalty: penalty,
+        shortQueryCluster: next.shortQueryCluster,
+        finalScore: next.rank.finalScore - penalty
+      };
+      clusterCounts.set(next.shortQueryCluster, seen + 1);
+      selected.push(next);
+    }
+
+    return selected;
+  }
+
   function formatDateLabel(value) {
     if (!value) return "时间未知";
     const date = new Date(value);
@@ -835,6 +961,7 @@
     container.querySelectorAll('[data-cc98-smart-search-supplemental="1"]').forEach((card) => card.remove());
     state.supplementalAdded = 0;
     state.supplementalQueries = [];
+    state.shortQueryPhrases = [];
     state.supplementalError = "";
     state.supplementalStatus = "";
   }
@@ -888,8 +1015,11 @@
     clearSupplementalCards(container);
     state.supplementalKey = key;
 
-    const queries = buildSupplementalQueries(parsed);
+    const queries = buildSupplementalQueriesFromContainer(parsed, container);
     state.supplementalQueries = queries;
+    state.shortQueryPhrases = getShortQueryTerm(parsed)
+      ? queries.filter((query) => normalizeText(query) !== normalizeText(buildNativeSearchQuery(parsed))).slice(0, 4)
+      : [];
     if (!queries.length) return;
     state.supplementalStatus = `等待 ${(supplementalDelayMs() / 1000).toFixed(1)}s 后补召回`;
 
@@ -986,12 +1116,15 @@
     const supplement = state.supplementalQueries.length
       ? ` · API 补召回${state.supplementalRunning ? "中" : ""}：${state.supplementalAdded} 条`
       : "";
+    const shortQuery = state.shortQueryPhrases.length
+      ? ` · 短词扩召回：${state.shortQueryPhrases.join(" / ")}`
+      : "";
     const warning = state.supplementalStatus
       ? ` · ${state.supplementalStatus}`
       : state.supplementalError
         ? ` · ${state.supplementalError}`
         : "";
-    hint.textContent = `已按 ${modeLabels[state.activeMode] || "综合"} SearchRank 原生重排 ${visibleCount}/${totalCount} 条结果${supplement}${warning}`;
+    hint.textContent = `已按 ${modeLabels[state.activeMode] || "综合"} SearchRank 原生重排 ${visibleCount}/${totalCount} 条结果${supplement}${shortQuery}${warning}`;
     if (parsed) {
       const include = parsed.include.length ? `+ ${parsed.include.join(" / ")}` : "";
       const terms = parsed.terms.length ? parsed.terms.join(" / ") : "";
@@ -1019,10 +1152,10 @@
         return;
       }
 
-      const ranked = cards
+      const ranked = diversifyShortQueryRanking(cards
         .map((card, originalIndex) => extractNativeResult(card, originalIndex))
         .map((result) => ({ ...result, rank: scoreResult(result, parsed) }))
-        .sort((a, b) => b.rank.finalScore - a.rank.finalScore);
+        .sort((a, b) => b.rank.finalScore - a.rank.finalScore), parsed);
 
       let visibleCount = 0;
       const fragment = document.createDocumentFragment();
@@ -1030,7 +1163,10 @@
         const keep = !shouldDropResult(result, parsed) && satisfiesInclude(result, parsed);
         result.card.classList.toggle("cc98-smart-search-hidden", !keep);
         result.card.dataset.cc98SmartSearchScore = result.rank.finalScore.toFixed(1);
-        result.card.title = `SearchRank ${result.rank.finalScore.toFixed(1)} | 相关 ${result.rank.relevanceScore.toFixed(0)} | 时间 ${result.rank.timeScore.toFixed(0)} | 热度 ${result.rank.hotScore.toFixed(0)}`;
+        const diversity = result.rank.diversityPenalty
+          ? ` | 短词簇 ${result.rank.shortQueryCluster} -${result.rank.diversityPenalty.toFixed(0)}`
+          : "";
+        result.card.title = `SearchRank ${result.rank.finalScore.toFixed(1)} | 相关 ${result.rank.relevanceScore.toFixed(0)} | 时间 ${result.rank.timeScore.toFixed(0)} | 热度 ${result.rank.hotScore.toFixed(0)}${diversity}`;
         if (keep) visibleCount += 1;
         fragment.appendChild(result.card);
       }

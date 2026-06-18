@@ -60,10 +60,15 @@
     "iv"
   ];
 
+  const shortQueryExpansions = {
+    "梅": ["梅花", "梅雨", "青梅"]
+  };
+
   globalThis.CC98_SMART_SEARCH_LEXICON = {
     courseAliasGroups,
     teacherAliasGroups,
     aliasGroups: [...courseAliasGroups, ...teacherAliasGroups],
-    segmentTerms
+    segmentTerms,
+    shortQueryExpansions
   };
 })();
