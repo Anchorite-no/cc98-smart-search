@@ -22,3 +22,106 @@
 .focus-topic[data-cc98-smart-search-score]:hover {
   border-color: rgba(64, 158, 255, 0.55);
 }
+
+.focus-topic.cc98-smart-search-api-card {
+  align-items: stretch;
+  border: 1px solid #9bc8ec;
+  box-sizing: border-box;
+  display: flex;
+  min-height: 86px;
+}
+
+.cc98-smart-search-api-user {
+  align-items: center;
+  background: #4a9adb;
+  color: #fff;
+  display: flex;
+  gap: 12px;
+  min-width: 210px;
+  padding: 14px;
+}
+
+.cc98-smart-search-api-avatar {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 50%;
+  display: flex;
+  flex: 0 0 auto;
+  font-size: 20px;
+  font-weight: 700;
+  height: 54px;
+  justify-content: center;
+  width: 54px;
+}
+
+.cc98-smart-search-api-card .focus-topic-userName {
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.cc98-smart-search-api-main {
+  background: #fff;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 14px 18px;
+}
+
+.cc98-smart-search-api-card .focus-topic-title {
+  color: #111;
+  display: block;
+  font-size: 20px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cc98-smart-search-api-card .focus-topic-title:hover {
+  text-decoration: underline;
+}
+
+.cc98-smart-search-api-card .focus-topic-info {
+  align-items: center;
+  color: #222;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 13px;
+  gap: 8px 18px;
+  margin-top: 10px;
+}
+
+.cc98-smart-search-api-card .focus-topic-board {
+  align-items: center;
+  background: #fff;
+  border-left: 1px solid #222;
+  color: #111;
+  display: flex;
+  flex: 0 0 120px;
+  font-size: 17px;
+  justify-content: center;
+  margin: 18px 0;
+  padding: 0 14px;
+  text-align: center;
+  text-decoration: none;
+}
+
+@media (max-width: 760px) {
+  .focus-topic.cc98-smart-search-api-card {
+    display: block;
+  }
+
+  .cc98-smart-search-api-user {
+    min-width: 0;
+  }
+
+  .cc98-smart-search-api-card .focus-topic-board {
+    border-left: 0;
+    border-top: 1px solid #d9e6f2;
+    flex-basis: auto;
+    justify-content: flex-start;
+    margin: 0;
+    padding: 10px 18px;
+  }
+}

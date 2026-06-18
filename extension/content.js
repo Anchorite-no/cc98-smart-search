@@ -1,6 +1,10 @@
 (function () {
   "use strict";
 
+  const API_BASE = "https://api.cc98.org";
+  const PAGE_SIZE = 20;
+  const CACHE_TTL_MS = 10 * 60 * 1000;
+  const API_TIMEOUT_MS = 8000;
   const QUERY_SESSION_KEY = "cc98-smart-search:lastQuery";
   const DEFAULT_SETTINGS = {
     enabled: true,
@@ -34,7 +38,13 @@
     isSorting: false,
     observer: null,
     sortTimer: null,
-    suppressMutations: false
+    suppressMutations: false,
+    cache: new Map(),
+    supplementalKey: "",
+    supplementalRunning: false,
+    supplementalAdded: 0,
+    supplementalQueries: [],
+    supplementalError: ""
   };
 
   function normalizeSettings(settings) {
@@ -152,6 +162,133 @@
 
   function buildNativeSearchQuery(parsed) {
     return [...parsed.include, ...parsed.terms].filter(Boolean).join(" ").trim();
+  }
+
+  function getCurrentSearchBoardId() {
+    const searchBoard = new URLSearchParams(location.search).get("boardId");
+    return Number.parseInt(searchBoard, 10) || 0;
+  }
+
+  function maxSupplementalQueries() {
+    const level = Math.max(0, Math.min(3, Number.parseInt(state.settings.fuzzyLevel, 10) || 0));
+    return [0, 2, 4, 6][level] || 0;
+  }
+
+  function buildSupplementalQueries(parsed) {
+    const limit = maxSupplementalQueries();
+    if (limit <= 0) return [];
+
+    const baseTerms = [...parsed.include, ...parsed.terms].filter(Boolean).slice(0, 5);
+    if (!baseTerms.length) return [];
+
+    const originalQuery = normalizeText(buildNativeSearchQuery(parsed));
+    const queries = [];
+
+    for (let index = 0; index < baseTerms.length && queries.length < limit; index += 1) {
+      const term = baseTerms[index];
+      const aliases = aliasesFor(term, state.settings.fuzzyLevel).slice(1);
+
+      for (const alias of aliases) {
+        if (queries.length >= limit) break;
+        const nextTerms = baseTerms.slice();
+        nextTerms[index] = alias;
+        const query = nextTerms.join(" ").trim();
+        if (query && normalizeText(query) !== originalQuery) {
+          queries.push(query);
+        }
+      }
+    }
+
+    const seen = new Set();
+    return queries.filter((query) => {
+      const key = normalizeText(query);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function supplementalKeyFor(parsed) {
+    return [
+      getCurrentSearchBoardId(),
+      state.settings.fuzzyLevel,
+      buildNativeSearchQuery(parsed),
+      parsed.exclude.join(" ")
+    ].map(normalizeText).join("|");
+  }
+
+  function readCc98Storage(key) {
+    const raw = window.localStorage.getItem(key);
+    const expiresAt = window.localStorage.getItem(`${key}_expirationTime`);
+    if (expiresAt && Date.now() > Number.parseInt(expiresAt, 10) * 1000) {
+      return null;
+    }
+    if (!raw) return null;
+    if (raw.startsWith("str-")) return raw.slice(4);
+    if (raw.startsWith("obj-")) {
+      try {
+        return JSON.parse(raw.slice(4));
+      } catch (_error) {
+        return null;
+      }
+    }
+    return raw;
+  }
+
+  function getAuthorizationHeader() {
+    const token = readCc98Storage("accessToken");
+    return typeof token === "string" && token.startsWith("Bearer ") ? token : null;
+  }
+
+  async function cc98Fetch(path, options) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+    const headers = new Headers(options && options.headers ? options.headers : undefined);
+    const authorization = getAuthorizationHeader();
+    if (authorization) headers.set("Authorization", authorization);
+    headers.set("Accept", "application/json");
+
+    try {
+      const response = await fetch(new URL(path, API_BASE).toString(), {
+        ...options,
+        headers,
+        signal: controller.signal
+      });
+
+      if (response.status === 401) {
+        const error = new Error("需要登录 CC98 后才能使用 API 补召回。");
+        error.code = "CC98_UNAUTHORIZED";
+        throw error;
+      }
+      if (response.status === 403) {
+        const error = new Error("CC98 暂时拒绝 API 补召回请求。");
+        error.code = "CC98_RATE_LIMITED";
+        throw error;
+      }
+      if (!response.ok) {
+        throw new Error(`CC98 API 补召回失败：${response.status}`);
+      }
+      return response.json();
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  async function fetchTopicSearch(boardId, query) {
+    const cacheKey = `${boardId || 0}:${query}`;
+    const cached = state.cache.get(cacheKey);
+    if (cached && Date.now() - cached.time < CACHE_TTL_MS) {
+      return cached.data;
+    }
+
+    const encoded = encodeURIComponent(query);
+    const path = boardId === 0
+      ? `/topic/search?keyword=${encoded}&size=${PAGE_SIZE}&from=0`
+      : `/topic/search/board/${boardId}?keyword=${encoded}&size=${PAGE_SIZE}&from=0`;
+    const data = await cc98Fetch(path);
+    const normalized = Array.isArray(data) ? data : [];
+    state.cache.set(cacheKey, { time: Date.now(), data: normalized });
+    return normalized;
   }
 
   function doubleEncode(value) {
@@ -388,6 +525,162 @@
     };
   }
 
+  function formatDateLabel(value) {
+    if (!value) return "时间未知";
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return String(value);
+    const pad = (number) => String(number).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  function createElement(tagName, className, text) {
+    const element = document.createElement(tagName);
+    if (className) element.className = className;
+    if (text !== undefined) element.textContent = text;
+    return element;
+  }
+
+  function getTopicKeyFromCard(card) {
+    const datasetId = card.dataset.cc98SmartSearchTopicId;
+    if (datasetId) return `topic:${datasetId}`;
+
+    const topicLink = card.querySelector('a[href*="/topic/"], [href*="/topic/"]');
+    const href = topicLink?.getAttribute("href") || "";
+    const match = href.match(/\/topic\/(\d+)/i);
+    if (match) return `topic:${match[1]}`;
+
+    const title = card.querySelector(".focus-topic-title")?.textContent || "";
+    const userName = card.querySelector(".focus-topic-userName")?.textContent || "";
+    const infoText = card.querySelector(".focus-topic-info")?.textContent || "";
+    return `fallback:${normalizeText([title, userName, infoText].join("|"))}`;
+  }
+
+  function createApiResultCard(raw, sourceQuery, index) {
+    const topicId = raw.id || raw.topicId;
+    if (!topicId) return null;
+
+    const card = createElement("div", "focus-topic cc98-smart-search-api-card");
+    card.dataset.cc98SmartSearchSupplemental = "1";
+    card.dataset.cc98SmartSearchTopicId = String(topicId);
+    card.dataset.cc98SmartSearchSourceQuery = sourceQuery;
+    card.dataset.cc98SmartSearchOriginalIndex = String(10000 + index);
+    card.dataset.cc98SmartSearchHadTitle = "0";
+    card.dataset.cc98SmartSearchHitCount = String(raw.hitCount || 0);
+    card.dataset.cc98SmartSearchReplyCount = String(raw.replyCount || 0);
+
+    const userColumn = createElement("div", "cc98-smart-search-api-user");
+    const avatar = createElement("div", "cc98-smart-search-api-avatar", (raw.userName || "匿").slice(0, 1));
+    const userName = createElement("div", "focus-topic-userName", raw.userName || "匿名用户");
+    userColumn.append(avatar, userName);
+
+    const main = createElement("div", "cc98-smart-search-api-main");
+    const title = createElement("a", "focus-topic-title", raw.title || "(无标题)");
+    title.href = `/topic/${topicId}/1`;
+    const info = createElement("div", "focus-topic-info");
+    info.append(
+      createElement("span", "", formatDateLabel(raw.time)),
+      createElement("span", "", `浏览 ${raw.hitCount || 0}`),
+      createElement("span", "", `回复 ${raw.replyCount || 0}`),
+      createElement("span", "", raw.lastPostUser ? `最后回复：${raw.lastPostUser}` : "最后回复：未知")
+    );
+    main.append(title, info);
+
+    const board = createElement("a", "focus-topic-board", raw.boardName || (raw.boardId ? `版面 ${raw.boardId}` : "全站"));
+    board.href = raw.boardId ? `/board/${raw.boardId}` : "/";
+
+    card.append(userColumn, main, board);
+    return card;
+  }
+
+  function clearSupplementalCards(container) {
+    container.querySelectorAll('[data-cc98-smart-search-supplemental="1"]').forEach((card) => card.remove());
+    state.supplementalAdded = 0;
+    state.supplementalQueries = [];
+    state.supplementalError = "";
+  }
+
+  function appendApiResults(container, results, sourceQuery) {
+    const known = new Set(
+      Array.from(container.querySelectorAll(":scope > .focus-topic")).map((card) => getTopicKeyFromCard(card))
+    );
+    const fragment = document.createDocumentFragment();
+    let appended = 0;
+
+    for (const raw of results) {
+      const card = createApiResultCard(raw, sourceQuery, state.supplementalAdded + appended);
+      if (!card) continue;
+
+      const key = getTopicKeyFromCard(card);
+      if (known.has(key)) continue;
+
+      known.add(key);
+      fragment.appendChild(card);
+      appended += 1;
+    }
+
+    if (appended > 0) {
+      state.suppressMutations = true;
+      container.appendChild(fragment);
+      window.setTimeout(() => {
+        state.suppressMutations = false;
+      }, 0);
+    }
+
+    return appended;
+  }
+
+  function describeSupplementalError(error) {
+    if (!error) return "";
+    if (error.name === "AbortError") return "API 超时";
+    if (error.code === "CC98_RATE_LIMITED") return "API 被限流";
+    if (error.code === "CC98_UNAUTHORIZED") return "未登录或授权失效";
+    return "API 暂不可用";
+  }
+
+  function ensureSupplementalResults(container, parsed) {
+    const key = supplementalKeyFor(parsed);
+    if (state.supplementalKey === key && state.supplementalRunning) return;
+    if (state.supplementalKey === key && state.supplementalQueries.length) return;
+    if (state.supplementalRunning && state.supplementalKey !== key) {
+      state.supplementalRunning = false;
+    }
+
+    clearSupplementalCards(container);
+    state.supplementalKey = key;
+
+    const queries = buildSupplementalQueries(parsed);
+    state.supplementalQueries = queries;
+    if (!queries.length) return;
+
+    runSupplementalSearches(container, key, queries);
+  }
+
+  async function runSupplementalSearches(container, key, queries) {
+    state.supplementalRunning = true;
+    state.supplementalError = "";
+    const boardId = getCurrentSearchBoardId();
+
+    try {
+      for (const query of queries) {
+        try {
+          const results = await fetchTopicSearch(boardId, query);
+          if (state.supplementalKey !== key) return;
+          state.supplementalAdded += appendApiResults(container, results, query);
+          sortNativeResultsSoon();
+        } catch (error) {
+          if (state.supplementalKey !== key) return;
+          state.supplementalError = describeSupplementalError(error);
+          break;
+        }
+      }
+    } finally {
+      if (state.supplementalKey === key) {
+        state.supplementalRunning = false;
+        sortNativeResultsSoon();
+      }
+    }
+  }
+
   function extractNativeResult(card, originalIndex) {
     if (!card.dataset.cc98SmartSearchOriginalIndex) {
       card.dataset.cc98SmartSearchOriginalIndex = String(originalIndex);
@@ -417,8 +710,8 @@
       infoText,
       time,
       lastPostTime,
-      hitCount: metricItems[0] || fallbackMetrics[0] || "0",
-      replyCount: "0",
+      hitCount: metricItems[0] || card.dataset.cc98SmartSearchHitCount || fallbackMetrics[0] || "0",
+      replyCount: metricItems[1] || card.dataset.cc98SmartSearchReplyCount || "0",
       originalIndex: Number.parseInt(card.dataset.cc98SmartSearchOriginalIndex, 10) || originalIndex
     };
   }
@@ -437,7 +730,12 @@
       hot: "热门",
       custom: "自定义"
     };
-    hint.textContent = `已按 ${modeLabels[state.activeMode] || "综合"} SearchRank 原生重排 ${visibleCount}/${totalCount} 条结果`;
+
+    const supplement = state.supplementalQueries.length
+      ? ` · API 补召回${state.supplementalRunning ? "中" : ""}：${state.supplementalAdded} 条`
+      : "";
+    const warning = state.supplementalError ? ` · ${state.supplementalError}` : "";
+    hint.textContent = `已按 ${modeLabels[state.activeMode] || "综合"} SearchRank 原生重排 ${visibleCount}/${totalCount} 条结果${supplement}${warning}`;
   }
 
   function sortNativeResults() {
@@ -446,14 +744,19 @@
     const container = document.querySelector(".focus-topic-topicArea");
     if (!container) return;
 
-    const cards = Array.from(container.querySelectorAll(":scope > .focus-topic"));
-    if (!cards.length) return;
-
     state.isSorting = true;
     state.suppressMutations = true;
     state.observer?.disconnect();
     try {
       const parsed = getQueryForCurrentSearchPage();
+      ensureSupplementalResults(container, parsed);
+
+      const cards = Array.from(container.querySelectorAll(":scope > .focus-topic"));
+      if (!cards.length) {
+        renderNativeHint(container, 0, 0);
+        return;
+      }
+
       const ranked = cards
         .map((card, originalIndex) => extractNativeResult(card, originalIndex))
         .map((result) => ({ ...result, rank: scoreResult(result, parsed) }))
@@ -487,11 +790,16 @@
 
   function restoreNativeResults() {
     const container = document.querySelector(".focus-topic-topicArea");
-    if (!container) return;
+    if (!container) {
+      document.getElementById("cc98-smart-search-native-hint")?.remove();
+      return;
+    }
+
+    state.supplementalKey = "";
+    state.supplementalRunning = false;
+    clearSupplementalCards(container);
 
     const cards = Array.from(container.querySelectorAll(":scope > .focus-topic"));
-    if (!cards.length) return;
-
     state.suppressMutations = true;
     state.observer?.disconnect();
     cards
