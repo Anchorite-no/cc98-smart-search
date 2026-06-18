@@ -1,0 +1,8 @@
+{
+  "name": "cc98-smart-search",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "node --check extension/content.js && node -e \"JSON.parse(require('fs').readFileSync('extension/manifest.json', 'utf8')); console.log('manifest ok')\""
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "CC98 Smart Search",
+  "version": "0.1.0",
+  "description": "A lightweight fuzzy search enhancer for CC98 topic search.",
+  "permissions": [],
+  "host_permissions": [
+    "https://www.cc98.org/*",
+    "https://api.cc98.org/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.cc98.org/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
