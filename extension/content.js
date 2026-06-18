@@ -2,10 +2,19 @@
   "use strict";
 
   const API_BASE = "https://api.cc98.org";
-  const MAX_QUERIES = 4;
   const PAGE_SIZE = 20;
   const CACHE_TTL_MS = 10 * 60 * 1000;
   const ROOT_ID = "cc98-smart-search-root";
+  const DEFAULT_SETTINGS = {
+    enabled: true,
+    fuzzyLevel: 1,
+    maxQueries: 1,
+    requestDelayMs: 1200,
+    rankingMode: "balanced",
+    relevanceWeight: 70,
+    timeWeight: 15,
+    hotWeight: 15
+  };
 
   const ALIASES = {
     "线性代数": ["线代", "linear algebra"],
@@ -25,11 +34,44 @@
   };
 
   const state = {
-    activeMode: "balanced",
+    activeMode: DEFAULT_SETTINGS.rankingMode,
     lastPayload: null,
+    settings: { ...DEFAULT_SETTINGS },
     cache: new Map(),
     boardNames: new Map()
   };
+
+  function normalizeSettings(settings) {
+    return { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  }
+
+  async function loadSettings() {
+    if (!globalThis.chrome?.storage?.local) {
+      state.settings = { ...DEFAULT_SETTINGS };
+      state.activeMode = DEFAULT_SETTINGS.rankingMode;
+      return state.settings;
+    }
+
+    const data = await chrome.storage.local.get("settings");
+    state.settings = normalizeSettings(data.settings);
+    state.activeMode = state.settings.rankingMode || "balanced";
+    return state.settings;
+  }
+
+  function installSettingsListener() {
+    if (!globalThis.chrome?.storage?.onChanged) return;
+
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== "local" || !changes.settings) return;
+      state.settings = normalizeSettings(changes.settings.newValue);
+      state.activeMode = state.settings.rankingMode || "balanced";
+      if (state.lastPayload) renderResults(state.lastPayload);
+    });
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
 
   function normalizeText(value) {
     return String(value || "")
@@ -62,41 +104,51 @@
     return { raw: String(input || "").trim(), include, exclude, terms };
   }
 
-  function aliasesFor(term) {
+  function aliasesFor(term, fuzzyLevel) {
     const normalized = normalizeText(term);
     const foundKey = Object.keys(ALIASES).find((key) => normalizeText(key) === normalized);
     const direct = foundKey ? ALIASES[foundKey] : [];
+    const level = Number.isFinite(fuzzyLevel) ? fuzzyLevel : state.settings.fuzzyLevel;
+    if (level <= 0) return [term];
+    if (level === 1) return uniq([term, ...direct.slice(0, 1)]);
+    if (level === 2) return uniq([term, ...direct.slice(0, 2)]);
     return uniq([term, ...direct]);
   }
 
   function expandedMatchTerms(term) {
-    return aliasesFor(term).map((value, index) => ({
+    return aliasesFor(term, state.settings.fuzzyLevel).map((value, index) => ({
       value,
       normalized: normalizeText(value),
       confidence: index === 0 ? 1 : index === 1 ? 0.85 : 0.6
     }));
   }
 
-  function generateSearchPlan(parsed) {
+  function generateSearchPlan(parsed, settings) {
     const searchableTerms = [...parsed.include, ...parsed.terms].filter(Boolean);
     if (searchableTerms.length === 0) return [];
 
     const base = searchableTerms.slice(0, 5);
     const plans = [base.join(" ")];
+    const maxQueries = Math.max(1, Math.min(4, Number.parseInt(settings.maxQueries, 10) || 1));
+    const fuzzyLevel = Math.max(0, Math.min(3, Number.parseInt(settings.fuzzyLevel, 10) || 0));
 
-    for (let index = 0; index < base.length && plans.length < MAX_QUERIES; index += 1) {
+    if (fuzzyLevel <= 0 || maxQueries <= 1) {
+      return plans.map((query, index) => ({ query, isOriginal: index === 0 }));
+    }
+
+    for (let index = 0; index < base.length && plans.length < maxQueries; index += 1) {
       const term = base[index];
-      const aliases = aliasesFor(term).filter((alias) => normalizeText(alias) !== normalizeText(term));
+      const aliases = aliasesFor(term, fuzzyLevel).filter((alias) => normalizeText(alias) !== normalizeText(term));
 
       for (const alias of aliases) {
-        if (plans.length >= MAX_QUERIES) break;
+        if (plans.length >= maxQueries) break;
         const next = base.slice();
         next[index] = alias;
         plans.push(next.join(" "));
       }
     }
 
-    return uniq(plans).slice(0, MAX_QUERIES).map((query, index) => ({
+    return uniq(plans).slice(0, maxQueries).map((query, index) => ({
       query,
       isOriginal: index === 0
     }));
@@ -140,7 +192,9 @@
       throw new Error("需要登录 CC98 后才能使用增强主题搜索。");
     }
     if (response.status === 403) {
-      throw new Error("搜索请求被 CC98 拒绝，可能是请求过于频繁。");
+      const error = new Error("搜索请求被 CC98 拒绝，可能是请求过于频繁。");
+      error.code = "CC98_RATE_LIMITED";
+      throw error;
     }
     if (!response.ok) {
       throw new Error(`CC98 搜索请求失败：${response.status}`);
@@ -292,16 +346,28 @@
     return score;
   }
 
-  function scoreResult(result, parsed, mode) {
+  function scoreResult(result, parsed, mode, settings) {
     const relevanceScore = getRelevanceScore(result, parsed, parsed.raw);
     const timeScore = getTimeScore(result);
     const hotScore = getHotScore(result);
 
-    const weights = {
+    const presets = {
       balanced: [0.7, 0.15, 0.15],
       recent: [0.4, 0.45, 0.15],
       hot: [0.4, 0.1, 0.5]
-    }[mode] || [0.7, 0.15, 0.15];
+    };
+    const customTotal = Math.max(
+      1,
+      Number(settings.relevanceWeight || 0) +
+        Number(settings.timeWeight || 0) +
+        Number(settings.hotWeight || 0)
+    );
+    const custom = [
+      Number(settings.relevanceWeight || 0) / customTotal,
+      Number(settings.timeWeight || 0) / customTotal,
+      Number(settings.hotWeight || 0) / customTotal
+    ];
+    const weights = mode === "custom" ? custom : presets[mode] || presets.balanced;
 
     return {
       relevanceScore,
@@ -338,11 +404,11 @@
       .filter((result) => satisfiesInclude(result, parsed));
   }
 
-  function rankResults(results, parsed, mode) {
+  function rankResults(results, parsed, mode, settings) {
     return results
       .map((result) => ({
         ...result,
-        rank: scoreResult(result, parsed, mode)
+        rank: scoreResult(result, parsed, mode, settings)
       }))
       .sort((a, b) => b.rank.finalScore - a.rank.finalScore);
   }
@@ -427,11 +493,12 @@
   function renderResults(payload) {
     state.lastPayload = payload;
     const root = ensureRoot();
-    const ranked = rankResults(payload.results, payload.parsed, state.activeMode);
+    const ranked = rankResults(payload.results, payload.parsed, state.activeMode, state.settings);
     const modes = [
       ["balanced", "综合"],
       ["recent", "最新"],
-      ["hot", "热门"]
+      ["hot", "热门"],
+      ["custom", "自定义"]
     ];
 
     root.innerHTML = `
@@ -451,6 +518,7 @@
           <strong>搜索计划</strong>
           ${payload.plan.map((item, index) => `<span>${index + 1}. ${escapeHtml(item.query)}</span>`).join("")}
         </div>
+        ${payload.warning ? `<div class="cc98-ss-warning">${escapeHtml(payload.warning)}</div>` : ""}
         <div class="cc98-ss-summary">
           找到 ${ranked.length} 条增强结果 · 范围：${escapeHtml(payload.boardName)}
         </div>
@@ -521,7 +589,25 @@
     `;
   }
 
+  function renderNotice(message) {
+    const root = ensureRoot();
+    root.innerHTML = `
+      <div class="cc98-ss-panel cc98-ss-notice">
+        <div class="cc98-ss-header">
+          <div>
+            <div class="cc98-ss-kicker">CC98 Smart Search</div>
+            <h2>增强搜索暂时跳过</h2>
+          </div>
+        </div>
+        <p>${escapeHtml(message)}</p>
+      </div>
+    `;
+  }
+
   async function runSmartSearch() {
+    const settings = await loadSettings();
+    if (!settings.enabled) return;
+
     const query = currentInputValue();
     if (!query) return;
 
@@ -534,7 +620,7 @@
 
     try {
       const parsed = parseQuery(query);
-      const plan = generateSearchPlan(parsed);
+      const plan = generateSearchPlan(parsed, settings);
       if (!plan.length) {
         throw new Error("请输入至少一个普通关键词或 + 必须词。");
       }
@@ -544,19 +630,40 @@
       renderShell(`正在搜索 ${plan.length} 组关键词...`);
 
       const batches = [];
-      for (const item of plan) {
-        const results = await fetchTopicSearch(boardId || 0, item.query);
-        batches.push({ query: item.query, results });
+      let warning = "";
+      for (let index = 0; index < plan.length; index += 1) {
+        const item = plan[index];
+        try {
+          const results = await fetchTopicSearch(boardId || 0, item.query);
+          batches.push({ query: item.query, results });
+        } catch (error) {
+          if (error.code === "CC98_RATE_LIMITED") {
+            warning = batches.length
+              ? "CC98 暂时限制了后续增强请求，已展示已取得的部分结果。可以在插件弹窗中降低模糊程度或增加请求间隔。"
+              : "CC98 暂时限制了增强请求。可以稍后重试，或在插件弹窗中关闭增强/降低模糊程度。";
+            break;
+          }
+          throw error;
+        }
+
+        if (index < plan.length - 1) {
+          await sleep(settings.requestDelayMs);
+        }
       }
 
+      if (!batches.length) {
+        renderNotice(warning || "没有拿到可用的增强搜索结果。");
+        return;
+      }
       const merged = mergeResults(batches, parsed);
-      renderResults({ parsed, plan, results: merged, boardId: boardId || 0, boardName });
+      renderResults({ parsed, plan: plan.slice(0, batches.length), results: merged, boardId: boardId || 0, boardName, warning });
     } catch (error) {
       renderError(error);
     }
   }
 
   function shouldHandleEvent(target) {
+    if (!state.settings.enabled) return false;
     const scope = currentScopeText();
     if (scope === "用户" || scope === "版面") return false;
     return Boolean(target && (target.closest?.(".searchIco") || target.id === "searchText"));
@@ -580,5 +687,6 @@
     }, true);
   }
 
-  installInterceptors();
+  installSettingsListener();
+  loadSettings().finally(installInterceptors);
 })();
