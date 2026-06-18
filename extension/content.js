@@ -15,116 +15,9 @@
     timeWeight: 15,
     hotWeight: 15
   };
-
-  const ALIASES = {
-    "线性代数": ["线代", "linear algebra"],
-    "线代": ["线性代数", "linear algebra"],
-    "线性代数II": ["线代II", "线性代数2", "线代2", "线代二"],
-    "线代II": ["线性代数II", "线性代数2", "线代2", "线代二"],
-    "线性代数2": ["线代2", "线性代数II", "线代II", "线代二"],
-    "线代2": ["线性代数2", "线性代数II", "线代II", "线代二"],
-    "线代二": ["线性代数二", "线性代数II", "线代II", "线代2"],
-    "线性代数二": ["线代二", "线性代数II", "线代II", "线代2"],
-    "高等代数": ["高代"],
-    "高代": ["高等代数"],
-    "数学分析": ["数分"],
-    "数分": ["数学分析"],
-    "数据结构": ["DS", "FDS"],
-    "ds": ["数据结构", "FDS"],
-    "fds": ["数据结构", "DS"],
-    "计算机系统": ["ICS", "CSAPP"],
-    "ics": ["计算机系统", "CSAPP"],
-    "微积分": ["微甲", "微乙", "calculus"],
-    "概率论": ["概统", "概率统计", "probability"],
-    "密码学": ["crypto", "cryptography"],
-    "汇编": ["ASM", "assembly"],
-    "操作系统": ["OS", "operating system"],
-    "数据库": ["DB", "database"],
-    "计算机网络": ["计网", "computer network"],
-    "韩刚": ["hg"],
-    "hg": ["韩刚"]
-  };
-
-  const SEGMENT_TERMS = [
-    "线性代数II",
-    "线性代数2",
-    "线性代数二",
-    "线代II",
-    "线代2",
-    "线代二",
-    "线性代数",
-    "linear algebra",
-    "高等代数",
-    "数学分析",
-    "数据结构",
-    "计算机系统",
-    "计算机网络",
-    "操作系统",
-    "概率统计",
-    "概率论",
-    "数据库",
-    "微积分",
-    "数字逻辑",
-    "数字系统",
-    "离散数学",
-    "离散结构",
-    "大学物理",
-    "普通物理",
-    "信号与系统",
-    "电路原理",
-    "机器学习",
-    "人工智能",
-    "密码学",
-    "汇编",
-    "线代",
-    "高代",
-    "数分",
-    "微甲",
-    "微乙",
-    "概统",
-    "计网",
-    "数逻",
-    "离散",
-    "大物",
-    "普物",
-    "信号",
-    "电路",
-    "算法",
-    "韩刚",
-    "老师",
-    "期中",
-    "期末",
-    "考试",
-    "试卷",
-    "答案",
-    "习题",
-    "作业",
-    "教材",
-    "网课",
-    "复习",
-    "资料",
-    "历年",
-    "回忆卷",
-    "春夏",
-    "秋冬",
-    "夏学期",
-    "冬学期",
-    "c语言",
-    "c程",
-    "python",
-    "java",
-    "csapp",
-    "fds",
-    "ics",
-    "asm",
-    "ds",
-    "os",
-    "db",
-    "hg",
-    "ii",
-    "iii",
-    "iv"
-  ];
+  const LEXICON = globalThis.CC98_SMART_SEARCH_LEXICON || {};
+  const RAW_ALIAS_GROUPS = Array.isArray(LEXICON.aliasGroups) ? LEXICON.aliasGroups : [];
+  const SEGMENT_TERMS = Array.isArray(LEXICON.segmentTerms) ? LEXICON.segmentTerms : [];
 
   const state = {
     settings: { ...DEFAULT_SETTINGS },
@@ -230,6 +123,24 @@
     }
     return result;
   }
+
+  function buildAliasMap(groups) {
+    const aliasMap = {};
+
+    for (const group of groups) {
+      if (!Array.isArray(group)) continue;
+      const terms = uniq(group.map((value) => String(value || "").trim()).filter(Boolean));
+
+      for (const term of terms) {
+        const related = terms.filter((value) => normalizeText(value) !== normalizeText(term));
+        aliasMap[term] = uniq([...(aliasMap[term] || []), ...related]);
+      }
+    }
+
+    return aliasMap;
+  }
+
+  const ALIASES = buildAliasMap(RAW_ALIAS_GROUPS);
 
   let segmentEntries = null;
 
@@ -356,7 +267,7 @@
     return aliasesFor(term, state.settings.fuzzyLevel).map((value, index) => ({
       value,
       normalized: normalizeText(value),
-      confidence: index === 0 ? 1 : index === 1 ? 0.85 : 0.6
+      confidence: index === 0 ? 1 : 0.85
     }));
   }
 

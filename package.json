@@ -3,6 +3,6 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "node --check extension/content.js && node --check extension/popup.js && node -e \"JSON.parse(require('fs').readFileSync('extension/manifest.json', 'utf8')); console.log('manifest ok')\""
+    "build": "node --check extension/lexicon.js && node --check extension/content.js && node --check extension/popup.js && node -e \"JSON.parse(require('fs').readFileSync('extension/manifest.json', 'utf8')); console.log('manifest ok')\""
   }
 }

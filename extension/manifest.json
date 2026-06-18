@@ -20,6 +20,7 @@
         "https://www.cc98.org/*"
       ],
       "js": [
+        "lexicon.js",
         "content.js"
       ],
       "css": [
