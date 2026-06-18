@@ -24,6 +24,17 @@ const ids = [
 
 const elements = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 const status = document.getElementById("status");
+const storage = globalThis.chrome?.storage?.local || {
+  async get(key) {
+    const raw = window.localStorage.getItem(`cc98-smart-search:${key}`);
+    return { [key]: raw ? JSON.parse(raw) : undefined };
+  },
+  async set(values) {
+    for (const [key, value] of Object.entries(values)) {
+      window.localStorage.setItem(`cc98-smart-search:${key}`, JSON.stringify(value));
+    }
+  }
+};
 
 function normalizeSettings(raw) {
   return { ...DEFAULT_SETTINGS, ...(raw || {}) };
@@ -65,12 +76,12 @@ function readForm() {
 async function save() {
   const settings = readForm();
   updateOutputs(settings);
-  await chrome.storage.local.set({ settings });
+  await storage.set({ settings });
   status.textContent = "已保存";
 }
 
 async function load() {
-  const { settings } = await chrome.storage.local.get("settings");
+  const { settings } = await storage.get("settings");
   render(normalizeSettings(settings));
 }
 
@@ -82,7 +93,7 @@ for (const element of Object.values(elements)) {
 }
 
 document.getElementById("reset").addEventListener("click", async () => {
-  await chrome.storage.local.set({ settings: DEFAULT_SETTINGS });
+  await storage.set({ settings: DEFAULT_SETTINGS });
   render(DEFAULT_SETTINGS);
   status.textContent = "已恢复默认";
 });
