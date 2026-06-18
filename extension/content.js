@@ -229,6 +229,7 @@
     const include = [];
     const exclude = [];
     const terms = [];
+    const tokenGroups = [];
     const tokens = splitQueryTokens(input);
 
     for (const rawToken of tokens) {
@@ -236,6 +237,7 @@
       const body = sign ? rawToken.slice(1) : rawToken;
       const segmented = segmentToken(body);
       const values = segmented.length ? segmented : [body].filter(Boolean);
+      if (values.length) tokenGroups.push({ sign, values: uniq(values) });
 
       if (sign === "+") {
         include.push(...values);
@@ -250,7 +252,8 @@
       raw: String(input || "").trim(),
       include: uniq(include),
       exclude: uniq(exclude),
-      terms: uniq(terms)
+      terms: uniq(terms),
+      tokenGroups
     };
   }
 
@@ -303,9 +306,18 @@
     return Number.parseInt(searchBoard, 10) || 0;
   }
 
-  function maxSupplementalQueries() {
+  function getSplitTokenGroups(parsed) {
+    const groups = Array.isArray(parsed?.tokenGroups) ? parsed.tokenGroups : [];
+    if (groups.length < 2) return [];
+    return groups.filter((group) => group && group.sign !== "-" && Array.isArray(group.values));
+  }
+
+  function maxSupplementalQueries(parsed = null) {
     const level = Math.max(0, Math.min(3, Number.parseInt(state.settings.fuzzyLevel, 10) || 0));
-    return [0, 2, 4, 6][level] || 0;
+    const base = [0, 2, 4, 6][level] || 0;
+    const splitCount = getSplitTokenGroups(parsed).length;
+    if (!splitCount) return base;
+    return Math.max(splitCount, base + Math.min(splitCount, 2));
   }
 
   function supplementalDelayMs(multiplier = 1) {
@@ -444,15 +456,28 @@
       .slice(0, limit);
   }
 
+  function buildSplitTokenSupplementalQueries(parsed, limit) {
+    const groups = getSplitTokenGroups(parsed);
+    if (!groups.length || limit <= 0) return [];
+
+    return uniq(groups
+      .map((group) => uniq(group.values || []).filter(Boolean).join(" ").trim())
+      .filter(Boolean))
+      .slice(0, limit);
+  }
+
   function buildSupplementalQueriesFromContainer(parsed, container) {
-    const limit = maxSupplementalQueries();
+    const limit = maxSupplementalQueries(parsed);
     if (limit <= 0) return [];
 
     const baseTerms = [...parsed.include, ...parsed.terms].filter(Boolean).slice(0, 5);
     if (!baseTerms.length) return [];
 
     const originalQuery = normalizeText(buildNativeSearchQuery(parsed));
-    const queries = buildShortQuerySupplementalQueries(parsed, container, limit);
+    const queries = uniq([
+      ...buildShortQuerySupplementalQueries(parsed, container, limit),
+      ...buildSplitTokenSupplementalQueries(parsed, limit)
+    ]).slice(0, limit);
 
     for (let index = 0; index < baseTerms.length && queries.length < limit; index += 1) {
       const term = baseTerms[index];
@@ -1084,7 +1109,7 @@
     state.supplementalRunning = true;
     state.supplementalError = "";
     const boardId = getCurrentSearchBoardId();
-    const queryLimit = maxSupplementalQueries();
+    const queryLimit = maxSupplementalQueries(parsed);
 
     try {
       await sleep(supplementalDelayMs());
