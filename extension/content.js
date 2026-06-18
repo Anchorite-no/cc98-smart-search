@@ -19,6 +19,16 @@
   const ALIASES = {
     "线性代数": ["线代", "linear algebra"],
     "线代": ["线性代数", "linear algebra"],
+    "线性代数II": ["线代II", "线性代数2", "线代2", "线代二"],
+    "线代II": ["线性代数II", "线性代数2", "线代2", "线代二"],
+    "线性代数2": ["线代2", "线性代数II", "线代II", "线代二"],
+    "线代2": ["线性代数2", "线性代数II", "线代II", "线代二"],
+    "线代二": ["线性代数二", "线性代数II", "线代II", "线代2"],
+    "线性代数二": ["线代二", "线性代数II", "线代II", "线代2"],
+    "高等代数": ["高代"],
+    "高代": ["高等代数"],
+    "数学分析": ["数分"],
+    "数分": ["数学分析"],
     "数据结构": ["DS", "FDS"],
     "ds": ["数据结构", "FDS"],
     "fds": ["数据结构", "DS"],
@@ -30,8 +40,91 @@
     "汇编": ["ASM", "assembly"],
     "操作系统": ["OS", "operating system"],
     "数据库": ["DB", "database"],
-    "计算机网络": ["计网", "computer network"]
+    "计算机网络": ["计网", "computer network"],
+    "韩刚": ["hg"],
+    "hg": ["韩刚"]
   };
+
+  const SEGMENT_TERMS = [
+    "线性代数II",
+    "线性代数2",
+    "线性代数二",
+    "线代II",
+    "线代2",
+    "线代二",
+    "线性代数",
+    "linear algebra",
+    "高等代数",
+    "数学分析",
+    "数据结构",
+    "计算机系统",
+    "计算机网络",
+    "操作系统",
+    "概率统计",
+    "概率论",
+    "数据库",
+    "微积分",
+    "数字逻辑",
+    "数字系统",
+    "离散数学",
+    "离散结构",
+    "大学物理",
+    "普通物理",
+    "信号与系统",
+    "电路原理",
+    "机器学习",
+    "人工智能",
+    "密码学",
+    "汇编",
+    "线代",
+    "高代",
+    "数分",
+    "微甲",
+    "微乙",
+    "概统",
+    "计网",
+    "数逻",
+    "离散",
+    "大物",
+    "普物",
+    "信号",
+    "电路",
+    "算法",
+    "韩刚",
+    "老师",
+    "期中",
+    "期末",
+    "考试",
+    "试卷",
+    "答案",
+    "习题",
+    "作业",
+    "教材",
+    "网课",
+    "复习",
+    "资料",
+    "历年",
+    "回忆卷",
+    "春夏",
+    "秋冬",
+    "夏学期",
+    "冬学期",
+    "c语言",
+    "c程",
+    "python",
+    "java",
+    "csapp",
+    "fds",
+    "ics",
+    "asm",
+    "ds",
+    "os",
+    "db",
+    "hg",
+    "ii",
+    "iii",
+    "iv"
+  ];
 
   const state = {
     settings: { ...DEFAULT_SETTINGS },
@@ -122,27 +215,129 @@
       .trim();
   }
 
+  function compactText(value) {
+    return normalizeText(value).replace(/[^\p{L}\p{N}]+/gu, "");
+  }
+
   function uniq(values) {
-    return Array.from(new Set(values.filter(Boolean)));
+    const seen = new Set();
+    const result = [];
+    for (const value of values.filter(Boolean)) {
+      const key = normalizeText(value);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(value);
+    }
+    return result;
+  }
+
+  let segmentEntries = null;
+
+  function getSegmentEntries() {
+    if (segmentEntries) return segmentEntries;
+
+    const values = [
+      ...SEGMENT_TERMS,
+      ...Object.keys(ALIASES),
+      ...Object.values(ALIASES).flat()
+    ];
+    segmentEntries = uniq(values)
+      .map((term) => ({ term, compact: compactText(term) }))
+      .filter((entry) => entry.compact.length >= 2)
+      .sort((left, right) => right.compact.length - left.compact.length);
+    return segmentEntries;
+  }
+
+  function matchSegmentAt(text, index) {
+    return getSegmentEntries().find((entry) => text.startsWith(entry.compact, index)) || null;
+  }
+
+  function isAsciiLetterOrNumber(char) {
+    return /^[a-z0-9]$/i.test(char);
+  }
+
+  function segmentToken(token) {
+    const text = compactText(token);
+    if (!text) return [];
+
+    const result = [];
+    let index = 0;
+    while (index < text.length) {
+      const matched = matchSegmentAt(text, index);
+      if (matched) {
+        result.push(matched.term);
+        index += matched.compact.length;
+        continue;
+      }
+
+      if (isAsciiLetterOrNumber(text[index])) {
+        let end = index + 1;
+        while (end < text.length && isAsciiLetterOrNumber(text[end]) && !matchSegmentAt(text, end)) {
+          end += 1;
+        }
+        result.push(text.slice(index, end));
+        index = end;
+        continue;
+      }
+
+      let end = index + 1;
+      while (end < text.length && !isAsciiLetterOrNumber(text[end]) && !matchSegmentAt(text, end)) {
+        end += 1;
+      }
+      result.push(text.slice(index, end));
+      index = end;
+    }
+
+    return uniq(result);
+  }
+
+  function splitQueryTokens(input) {
+    return String(input || "")
+      .normalize("NFKC")
+      .replace(/[，,;；、|/\\()[\]{}<>《》【】"'“”‘’]+/g, " ")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+  }
+
+  function textIncludes(haystack, needle) {
+    const normalizedHaystack = normalizeText(haystack);
+    const normalizedNeedle = normalizeText(needle);
+    if (!normalizedNeedle) return false;
+    if (normalizedHaystack.includes(normalizedNeedle)) return true;
+
+    const compactHaystack = compactText(haystack);
+    const compactNeedle = compactText(needle);
+    return Boolean(compactNeedle && compactHaystack.includes(compactNeedle));
   }
 
   function parseQuery(input) {
     const include = [];
     const exclude = [];
     const terms = [];
-    const tokens = String(input || "").trim().split(/\s+/).filter(Boolean);
+    const tokens = splitQueryTokens(input);
 
-    for (const token of tokens) {
-      if (token.startsWith("+") && token.length > 1) {
-        include.push(token.slice(1));
-      } else if (token.startsWith("-") && token.length > 1) {
-        exclude.push(token.slice(1));
+    for (const rawToken of tokens) {
+      const sign = rawToken.startsWith("+") || rawToken.startsWith("-") ? rawToken[0] : "";
+      const body = sign ? rawToken.slice(1) : rawToken;
+      const segmented = segmentToken(body);
+      const values = segmented.length ? segmented : [body].filter(Boolean);
+
+      if (sign === "+") {
+        include.push(...values);
+      } else if (sign === "-") {
+        exclude.push(...values);
       } else {
-        terms.push(token);
+        terms.push(...values);
       }
     }
 
-    return { raw: String(input || "").trim(), include, exclude, terms };
+    return {
+      raw: String(input || "").trim(),
+      include: uniq(include),
+      exclude: uniq(exclude),
+      terms: uniq(terms)
+    };
   }
 
   function aliasesFor(term, fuzzyLevel) {
@@ -186,7 +381,7 @@
   }
 
   function buildNativeSearchQuery(parsed) {
-    return [...parsed.include, ...parsed.terms].filter(Boolean).join(" ").trim();
+    return uniq([...parsed.include, ...parsed.terms]).filter(Boolean).join(" ").trim();
   }
 
   function getCurrentSearchBoardId() {
@@ -545,14 +740,14 @@
 
   function shouldDropResult(result, parsed) {
     const haystack = getResultText(result);
-    return parsed.exclude.some((term) => haystack.includes(normalizeText(term)));
+    return parsed.exclude.some((term) => textIncludes(haystack, term));
   }
 
   function satisfiesInclude(result, parsed) {
     if (parsed.include.length === 0) return true;
     const haystack = getResultText(result);
     return parsed.include.every((term) => {
-      return expandedMatchTerms(term).some((candidate) => haystack.includes(candidate.normalized));
+      return expandedMatchTerms(term).some((candidate) => textIncludes(haystack, candidate.normalized));
     });
   }
 
@@ -563,7 +758,7 @@
 
     for (const term of parsed.include) {
       for (const candidate of expandedMatchTerms(term)) {
-        if (haystack.includes(candidate.normalized)) {
+        if (textIncludes(haystack, candidate.normalized)) {
           score += candidate.confidence >= 1 ? 80 : candidate.confidence >= 0.8 ? 60 : 35;
           break;
         }
@@ -572,11 +767,11 @@
 
     for (const term of parsed.terms) {
       for (const candidate of expandedMatchTerms(term)) {
-        if (title.includes(candidate.normalized)) {
+        if (textIncludes(title, candidate.normalized)) {
           score += candidate.confidence >= 1 ? 30 : candidate.confidence >= 0.8 ? 25 : 10;
           break;
         }
-        if (haystack.includes(candidate.normalized)) {
+        if (textIncludes(haystack, candidate.normalized)) {
           score += candidate.confidence >= 1 ? 12 : 8;
           break;
         }
@@ -861,7 +1056,7 @@
     };
   }
 
-  function renderNativeHint(container, visibleCount, totalCount) {
+  function renderNativeHint(container, visibleCount, totalCount, parsed) {
     let hint = document.getElementById("cc98-smart-search-native-hint");
     if (!hint) {
       hint = document.createElement("div");
@@ -885,6 +1080,12 @@
         ? ` · ${state.supplementalError}`
         : "";
     hint.textContent = `已按 ${modeLabels[state.activeMode] || "综合"} SearchRank 原生重排 ${visibleCount}/${totalCount} 条结果${supplement}${warning}`;
+    if (parsed) {
+      const include = parsed.include.length ? `+ ${parsed.include.join(" / ")}` : "";
+      const terms = parsed.terms.length ? parsed.terms.join(" / ") : "";
+      const exclude = parsed.exclude.length ? `- ${parsed.exclude.join(" / ")}` : "";
+      hint.title = ["分词", include, terms, exclude].filter(Boolean).join("：");
+    }
   }
 
   function sortNativeResults() {
@@ -902,7 +1103,7 @@
 
       const cards = Array.from(container.querySelectorAll(":scope > .focus-topic"));
       if (!cards.length) {
-        renderNativeHint(container, 0, 0);
+        renderNativeHint(container, 0, 0, parsed);
         return;
       }
 
@@ -922,7 +1123,7 @@
         fragment.appendChild(result.card);
       }
       container.appendChild(fragment);
-      renderNativeHint(container, visibleCount, cards.length);
+      renderNativeHint(container, visibleCount, cards.length, parsed);
       window.setTimeout(() => {
         state.suppressMutations = false;
         observeNativeResults();
